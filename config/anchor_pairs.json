@@ -1,0 +1,35 @@
+{
+  "risk": [
+    [
+      "Policy Number",
+      "Inception Date"
+    ],
+    [
+      "Policy Number External",
+      "Sum Insured"
+    ],
+    [
+      "Broker",
+      "Effective Date"
+    ]
+  ],
+
+  "claims": [
+    [
+      "Claim Number",
+      "Claim Amount"
+    ],
+    [
+      "Insured Name",
+      "Paid Amount"
+    ],
+    [
+      "Policy Number",
+      "Date Reported"
+    ],
+    [
+      "Policy Number Source",
+      "Effective Date Value"
+    ]
+  ]
+}

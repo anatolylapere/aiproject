@@ -1,0 +1,39 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Test / coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Secrets ---
+# Never commit real passwords. Keep only a placeholder/example checked in.
+config/password.json
+
+# --- Runtime data (generated / local business data) ---
+input/*.xlsx
+input/*.xlsm
+input/*.xls
+output/
+logs/
+
+# --- Claude Code local settings ---
+.claude/settings.local.json
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
