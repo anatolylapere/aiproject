@@ -160,6 +160,18 @@ def worksheet_name_has_date(name):
     return bool(_DATE_PATTERN.search(name))
 
 
+_RISK_FILENAME_KEYWORDS = ("rolling", "by month", "database")
+
+
+def is_risk_filename(name):
+    """Risk source files are split into risk/ vs premium/ output by filename: a name
+    containing 'rolling', 'by month', or 'database' (case-insensitive, exact spelling)
+    is Risk; anything else is Premium.
+    """
+    lowered = name.lower()
+    return any(keyword in lowered for keyword in _RISK_FILENAME_KEYWORDS)
+
+
 def dedupe_header(header_values):
     """First occurrence of a label is unchanged; each later duplicate gets a _N suffix."""
     seen_counts = {}
@@ -180,7 +192,8 @@ def dedupe_header(header_values):
 def _write_table(ws, header_values, data_rows, metadata_string, contract_code_year):
     ws.append(dedupe_header(header_values) + ["ContractCodeYear", "metadata"])
     for i, row in enumerate(data_rows):
-        ws.append(list(row) + [contract_code_year, metadata_string if i == 0 else None])
+        trailing = [contract_code_year, metadata_string] if i == 0 else [None, None]
+        ws.append(list(row) + trailing)
 
 
 def _unique_sheet_name(name, used_names):

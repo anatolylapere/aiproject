@@ -13,7 +13,9 @@ from src import file_access
 from src.anchor_detection import load_anchor_pairs
 from src.contract_detection import load_contract_codes
 from src.logging_utils import ProcessingLogger, build_processing_log_workbook
-from src.sheet_processing import process_worksheet, worksheet_name_has_date, write_combined_workbook
+from src.sheet_processing import (
+    is_risk_filename, process_worksheet, worksheet_name_has_date, write_combined_workbook,
+)
 from src.validation import validate_table
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -103,15 +105,16 @@ def _write_grouped(base_dir, filename_stem, results, logger):
 
 
 def write_outputs(entry, worksheet_results, logger):
-    """Write extracted+validated tables to output/{risk|claims}/ (asymmetric grouping
-    per the approved plan - Risk always combines per source file; Claims splits out
+    """Write extracted+validated tables to output/{risk|premium|claims}/ (asymmetric
+    grouping per the approved plan - Risk always combines per source file, split into
+    output/risk/ or output/premium/ by a filename keyword check; Claims splits out
     section-bearing worksheets (grouped by ContractCodeYear, so worksheets sharing a
     section share a file) and date-named worksheets into their own files, combining
     everything else per source file). A worksheet that is both section-bearing and
     date-named is claimed by the section group first. Any output whose sheets agree on
-    a single contract code is nested under an output/{risk|claims}/{code}/ folder and
-    has that code appended to its filename - Risk's combined file, Claims' combined
-    file, Claims' date-split files, and (as already the case) Claims' section files.
+    a single contract code is nested under a {code}/ folder and has that code appended
+    to its filename - Risk/Premium's combined file, Claims' combined file, Claims'
+    date-split files, and (as already the case) Claims' section files.
     """
     passed = [r for r in worksheet_results if r.status == "extracted" and r.validation.passed]
     failed = [r for r in worksheet_results if r.status == "extracted" and not r.validation.passed]
@@ -124,7 +127,8 @@ def write_outputs(entry, worksheet_results, logger):
 
     stem = entry.source_file.stem
     if entry.ingestion_type == "risk":
-        _write_grouped(OUTPUT_ROOT / "risk", stem, passed, logger)
+        risk_or_premium = "risk" if is_risk_filename(stem) else "premium"
+        _write_grouped(OUTPUT_ROOT / risk_or_premium, stem, passed, logger)
         return
 
     sectioned = [r for r in passed if r.contract_section is not None]

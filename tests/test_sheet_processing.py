@@ -11,6 +11,7 @@ from src.sheet_processing import (
     dedupe_header,
     extract_data_block,
     has_meaningful_data,
+    is_risk_filename,
     process_worksheet,
     worksheet_name_has_date,
     write_combined_workbook,
@@ -151,6 +152,22 @@ def test_worksheet_name_has_date(name, expected):
 
 
 # ---------------------------------------------------------------------------
+# is_risk_filename
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,expected", [
+    ("file1_Risk_Rolling Total", True),
+    ("file1_Risk_By Month", True),
+    ("file1_Risk_Database Extract", True),
+    ("FILE1_RISK_ROLLING", True),  # case-insensitive
+    ("file1_Risk_ Bw01972", False),
+    ("file1_Risk_ Bw01972 Rollng Total", False),  # "Rollng" - missing "i", not a match
+])
+def test_is_risk_filename(name, expected):
+    assert is_risk_filename(name) is expected
+
+
+# ---------------------------------------------------------------------------
 # write_combined_workbook: grouping, metadata column, header dedup, overwrite
 # ---------------------------------------------------------------------------
 
@@ -182,8 +199,9 @@ def test_write_combined_workbook_single_result_is_one_sheet(tmp_path):
     assert workbook.sheetnames == ["Risk_Main"]
     ws = workbook["Risk_Main"]
     assert [c.value for c in ws[1]] == ["Policy Number", "Premium", "Premium_1", "ContractCodeYear", "metadata"]
+    # ContractCodeYear only on the first data row, same as metadata
     assert [c.value for c in ws[2]] == ["POL-1", 100, 10, "BW0197221A", "Broker|Acme"]
-    assert [c.value for c in ws[3]] == ["POL-2", 200, 20, "BW0197221A", None]
+    assert [c.value for c in ws[3]] == ["POL-2", 200, 20, None, None]
 
 
 def test_write_combined_workbook_multiple_results_multiple_sheets(tmp_path):

@@ -55,8 +55,10 @@ def test_risk_fixture_combines_into_one_workbook(tmp_path, monkeypatch):
     output_root, csv_path, results_by_type = _run(monkeypatch, tmp_path, [entry])
 
     # both sheets resolve the same parent code (BW01972), so the combined Risk file is
-    # nested under a BW01972/ folder with the code appended to its filename too
-    output_file = output_root / "risk" / "BW01972" / "Hardy_Risk_test__BW01972.xlsx"
+    # nested under a BW01972/ folder with the code appended to its filename too. The
+    # filename has none of the risk keywords ("rolling"/"by month"/"database"), so it
+    # routes to output/premium/, not output/risk/.
+    output_file = output_root / "premium" / "BW01972" / "Hardy_Risk_test__BW01972.xlsx"
     assert output_file.exists()
     workbook = openpyxl.load_workbook(output_file)
     assert set(workbook.sheetnames) == {"Risk_Main", "Risk_AltAnchor"}
@@ -82,6 +84,31 @@ def test_risk_fixture_combines_into_one_workbook(tmp_path, monkeypatch):
     contract_steps = [r for r in rows if r["step"] == "contract_detection" and r["worksheet_name"] == "Risk_Main"]
     assert contract_steps[0]["status"] == "ok"
     assert "BW01972" in contract_steps[0]["detail"]
+
+
+def test_risk_filename_with_rolling_keyword_routes_to_risk_folder(tmp_path, monkeypatch):
+    # Synthetic fixture: a Risk source file whose name correctly contains "Rolling" (not
+    # the "Rollng" typo in the real fixture) - proves the risk/ path, not just premium/.
+    source_path = tmp_path / "input" / "file_Risk_Hardy Rolling Total.xlsx"
+    source_path.parent.mkdir(parents=True)
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+
+    ws = workbook.create_sheet("Risk_Main")
+    ws.append(["Policy Number", "Inception Date"])
+    ws.append(["POL-1", "2026-01-01"])
+
+    workbook.save(source_path)
+
+    entry = FileListEntry(source_file=source_path, ingestion_type="risk")
+    output_root, _, results_by_type = _run(monkeypatch, tmp_path, [entry])
+
+    risk_main = next(r for r in results_by_type["risk"] if r.worksheet_name == "Risk_Main")
+    assert risk_main.contract_code_year == "BW01972"  # "Hardy" in the filename
+
+    output_file = output_root / "risk" / "BW01972" / "file_Risk_Hardy Rolling Total__BW01972.xlsx"
+    assert output_file.exists()
+    assert not (output_root / "premium").exists()
 
 
 def test_claims_fixture_combines_since_no_sheet_name_has_a_date(tmp_path, monkeypatch):
@@ -262,7 +289,7 @@ def test_rerun_overwrites_deterministically_and_never_touches_source(tmp_path, m
     source_bytes_before = entry.source_file.read_bytes()
 
     output_root_1, _, _ = _run(monkeypatch, tmp_path, [entry])
-    output_file = output_root_1 / "risk" / "BW01972" / "Hardy_Risk_test__BW01972.xlsx"
+    output_file = output_root_1 / "premium" / "BW01972" / "Hardy_Risk_test__BW01972.xlsx"
 
     output_root_2, _, _ = _run(monkeypatch, tmp_path, [entry])
 
