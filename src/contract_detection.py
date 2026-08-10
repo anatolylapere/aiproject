@@ -9,6 +9,10 @@ A base contract match can come from either an exact configured alias (word-bound
 isolated) or the code's digit-core followed by exactly two more digits (e.g. BW01972's
 '1972' matches the '197225' in a numeric broker-ref field), isolated from any longer
 digit run so it can't fire inside an unrelated bigger number.
+
+Section matching additionally recognises a table column literally named 'Property Sec'
+or 'Property Section': its first data row value is read directly as the section code,
+alongside (not instead of) the phrase-based tiers.
 """
 
 import json
@@ -118,6 +122,24 @@ def _find_alias_matches(alias_index, text_values):
     return matched_codes
 
 
+_SECTION_COLUMN_NAMES = {"property sec", "property section"}
+
+
+def _section_from_property_column(header_values, data_rows, sections):
+    """If a header column is literally named 'Property Sec'/'Property Section'
+    (case-insensitive), read the section letter directly from that column's first data
+    row value - the value itself IS the section code, not a phrase to search for. None
+    if there's no such column, no data, or the value doesn't match a configured section.
+    """
+    for idx, header in enumerate(header_values):
+        if header is not None and str(header).strip().lower() in _SECTION_COLUMN_NAMES:
+            if not data_rows or idx >= len(data_rows[0]) or data_rows[0][idx] is None:
+                return None
+            value = str(data_rows[0][idx]).strip()
+            return value if value in sections else None
+    return None
+
+
 def _evidence_tiers(source_file, worksheet_name, metadata, header_values, data_rows):
     table_values = [str(v) for v in header_values if v is not None]
     table_values.extend(str(v) for row in data_rows for v in row if v is not None)
@@ -168,8 +190,12 @@ def detect_contract_code_year(
     section_alias_index = _build_alias_index(
         {letter: entry["aliases"] for letter, entry in sections.items()}
     )
+    property_column_section = _section_from_property_column(header_values, data_rows, sections)
+
     for tier_name, texts in tiers:
         matched_sections = _find_alias_matches(section_alias_index, texts)
+        if tier_name == "table_columns_and_values" and property_column_section is not None:
+            matched_sections = matched_sections | {property_column_section}
         if len(matched_sections) == 1:
             section = matched_sections.pop()
             return ContractDetectionResult(

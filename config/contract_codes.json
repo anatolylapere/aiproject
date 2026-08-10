@@ -36,7 +36,25 @@
         "HDI Commission",
         "HDI % Of Ceded",
         "HDI Ceded %"
-      ]
+      ],
+      "sections": {
+        "A": {
+          "aliases": [
+            "Section A",
+            "Sec A",
+            "SectionA",
+            "SecA"
+          ]
+        },
+        "B": {
+          "aliases": [
+            "Section B",
+            "Sec B",
+            "SectionB",
+            "SecB"
+          ]
+        }
+      }
     }
   }
 }

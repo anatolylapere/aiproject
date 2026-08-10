@@ -104,17 +104,30 @@ def _write_grouped(base_dir, filename_stem, results, logger):
         write_combined_workbook(base_dir / f"{filename_stem}.xlsx", results, logger=logger)
 
 
+def _write_sectioned_groups(base_dir, stem, results, logger):
+    """Write every result with a resolved section to its own file, grouped by exact
+    ContractCodeYear (so worksheets sharing a section share a file). Returns the
+    remaining (non-sectioned) results for the caller to combine/split further.
+    """
+    sectioned = [r for r in results if r.contract_section is not None]
+    groups = {}
+    for result in sectioned:
+        groups.setdefault(result.contract_code_year, []).append(result)
+    for group in groups.values():
+        _write_grouped(base_dir, stem, group, logger)
+    return [r for r in results if r not in sectioned]
+
+
 def write_outputs(entry, worksheet_results, logger):
     """Write extracted+validated tables to output/{risk|premium|claims}/ (asymmetric
-    grouping per the approved plan - Risk always combines per source file, split into
-    output/risk/ or output/premium/ by a filename keyword check; Claims splits out
-    section-bearing worksheets (grouped by ContractCodeYear, so worksheets sharing a
-    section share a file) and date-named worksheets into their own files, combining
-    everything else per source file). A worksheet that is both section-bearing and
-    date-named is claimed by the section group first. Any output whose sheets agree on
-    a single contract code is nested under a {code}/ folder and has that code appended
-    to its filename - Risk/Premium's combined file, Claims' combined file, Claims'
-    date-split files, and (as already the case) Claims' section files.
+    grouping per the approved plan). Both Risk (split into output/risk/ or
+    output/premium/ by a filename keyword check) and Claims split out section-bearing
+    worksheets (grouped by ContractCodeYear, so worksheets sharing a section share a
+    file) into their own files first; Claims additionally splits date-named worksheets
+    into their own files. Whatever's left combines into one file per source file. A
+    worksheet that is both section-bearing and date-named is claimed by the section
+    group first. Any output whose sheets agree on a single contract code is nested
+    under a {code}/ folder and has that code appended to its filename.
     """
     passed = [r for r in worksheet_results if r.status == "extracted" and r.validation.passed]
     failed = [r for r in worksheet_results if r.status == "extracted" and not r.validation.passed]
@@ -126,19 +139,15 @@ def write_outputs(entry, worksheet_results, logger):
         return
 
     stem = entry.source_file.stem
+
     if entry.ingestion_type == "risk":
-        risk_or_premium = "risk" if is_risk_filename(stem) else "premium"
-        _write_grouped(OUTPUT_ROOT / risk_or_premium, stem, passed, logger)
+        base_dir = OUTPUT_ROOT / ("risk" if is_risk_filename(stem) else "premium")
+        remaining = _write_sectioned_groups(base_dir, stem, passed, logger)
+        if remaining:
+            _write_grouped(base_dir, stem, remaining, logger)
         return
 
-    sectioned = [r for r in passed if r.contract_section is not None]
-    sectioned_groups = {}
-    for result in sectioned:
-        sectioned_groups.setdefault(result.contract_code_year, []).append(result)
-    for group in sectioned_groups.values():
-        _write_grouped(OUTPUT_ROOT / "claims", stem, group, logger)
-
-    remaining = [r for r in passed if r not in sectioned]
+    remaining = _write_sectioned_groups(OUTPUT_ROOT / "claims", stem, passed, logger)
     dated = [r for r in remaining if worksheet_name_has_date(r.worksheet_name)]
     no_date = [r for r in remaining if r not in dated]
     for result in dated:

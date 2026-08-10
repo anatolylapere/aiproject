@@ -87,8 +87,8 @@ def test_risk_fixture_combines_into_one_workbook(tmp_path, monkeypatch):
 
 
 def test_risk_filename_with_rolling_keyword_routes_to_risk_folder(tmp_path, monkeypatch):
-    # Synthetic fixture: a Risk source file whose name correctly contains "Rolling" (not
-    # the "Rollng" typo in the real fixture) - proves the risk/ path, not just premium/.
+    # Synthetic fixture: a Risk source file whose name contains "Rolling" - proves the
+    # risk/ path independently of the real fixtures below (also named with "Rolling").
     source_path = tmp_path / "input" / "file_Risk_Hardy Rolling Total.xlsx"
     source_path.parent.mkdir(parents=True)
     workbook = openpyxl.Workbook()
@@ -109,6 +109,36 @@ def test_risk_filename_with_rolling_keyword_routes_to_risk_folder(tmp_path, monk
     output_file = output_root / "risk" / "BW01972" / "file_Risk_Hardy Rolling Total__BW01972.xlsx"
     assert output_file.exists()
     assert not (output_root / "premium").exists()
+
+
+def test_risk_property_sec_column_splits_sheets_by_section(tmp_path, monkeypatch):
+    # file1_Risk_ HDI Rolling Total.xlsx: filename resolves BW01973 (HDI); Risk_Main's
+    # Property Sec column reads "A" for every row, Risk_AltAnchor's reads "B" - each
+    # sheet resolves a different section, so unlike a plain combined Risk file, they
+    # must each land in their own output file (Risk now splits by section like Claims).
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "file1_Risk_ HDI Rolling Total.xlsx", ingestion_type="risk")
+
+    output_root, _, results_by_type = _run(monkeypatch, tmp_path, [entry])
+
+    statuses = {r.worksheet_name: r.contract_code_year for r in results_by_type["risk"]}
+    assert statuses["Risk_Main"] == "BW01973A"
+    assert statuses["Risk_AltAnchor"] == "BW01973B"
+
+    # filename correctly spells "Rolling", so this routes to risk/, not premium/
+    # (processing_log.xlsx is always written per ingestion type, alongside the data)
+    risk_dir = output_root / "risk"
+    assert sorted(p.name for p in risk_dir.iterdir()) == sorted(["BW01973A", "BW01973B", "processing_log.xlsx"])
+    assert not (output_root / "premium").exists()
+
+    section_a_file = openpyxl.load_workbook(
+        risk_dir / "BW01973A" / "file1_Risk_ HDI Rolling Total__BW01973A.xlsx"
+    )
+    assert section_a_file.sheetnames == ["Risk_Main"]
+
+    section_b_file = openpyxl.load_workbook(
+        risk_dir / "BW01973B" / "file1_Risk_ HDI Rolling Total__BW01973B.xlsx"
+    )
+    assert section_b_file.sheetnames == ["Risk_AltAnchor"]
 
 
 def test_claims_fixture_combines_since_no_sheet_name_has_a_date(tmp_path, monkeypatch):

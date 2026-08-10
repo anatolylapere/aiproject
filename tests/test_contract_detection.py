@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.contract_detection import detect_contract_code_year, load_contract_codes
+from src.contract_detection import ContractCodeConfig, detect_contract_code_year, load_contract_codes
 from src.metadata_extraction import MetadataBlock
 
 CONTRACT_CODES_PATH = Path(__file__).resolve().parent.parent / "config" / "contract_codes.json"
@@ -10,7 +10,7 @@ CONTRACT_CODES_PATH = Path(__file__).resolve().parent.parent / "config" / "contr
 # Load once and reuse everywhere below, so these tests always exercise whatever is
 # actually configured in contract_codes.json - no hand-copied config to drift out of
 # sync with it. Current shape: BW01972 (aliases incl. "Hardy"/"CNA", sections A/B) and
-# BW01973 (aliases incl. "HDI", no sections).
+# BW01973 (aliases incl. "HDI", sections A/B).
 REAL_CONFIG = load_contract_codes(CONTRACT_CODES_PATH)
 
 
@@ -31,7 +31,7 @@ def test_load_contract_codes_reads_real_config():
     assert "BW01972" in REAL_CONFIG.contracts and "BW01973" in REAL_CONFIG.contracts
     assert "Hardy" in REAL_CONFIG.contracts["BW01972"]["aliases"]
     assert "A" in REAL_CONFIG.contracts["BW01972"]["sections"]
-    assert REAL_CONFIG.contracts["BW01973"].get("sections") is None
+    assert "A" in REAL_CONFIG.contracts["BW01973"]["sections"]
 
 
 def test_load_contract_codes_rejects_missing_contracts_key(tmp_path):
@@ -166,10 +166,25 @@ def test_section_resolved_via_worksheet_name():
     assert result.status == "resolved"
 
 
-def test_section_not_applicable_when_contract_has_no_sections():
+def test_hdi_now_resolves_sections_too():
+    # both real contracts have sections configured now
     result = _detect(metadata_values=["HDI"], worksheet_name="Section A")
 
-    assert result.contract_code_year == "BW01973"
+    assert result.contract_code_year == "BW01973A"
+
+
+def test_section_not_applicable_when_contract_has_no_sections():
+    # synthetic config: a contract with no "sections" key at all must ignore
+    # section-shaped evidence entirely, rather than erroring or guessing
+    config = ContractCodeConfig(contracts={"X01": {"aliases": ["XCorp"]}})
+    result = detect_contract_code_year(
+        source_file=Path("file.xlsx"), worksheet_name="Section A",
+        metadata=MetadataBlock(values=["XCorp"]), header_values=[], data_rows=[],
+        contract_config=config,
+    )
+
+    assert result.contract_code_year == "X01"
+    assert result.section is None
 
 
 def test_no_section_evidence_anywhere_yields_base_code_only():
@@ -184,6 +199,52 @@ def test_section_ambiguous_within_a_tier_drops_section_but_keeps_base():
     assert result.contract_code_year == "BW01972"
     assert result.status == "resolved"
     assert "ambiguous" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# "Property Sec"/"Property Section" column: the cell value itself IS the section code
+# (mirrors file1_Risk_ HDI Rolling Total.xlsx's Property Sec column)
+# ---------------------------------------------------------------------------
+
+def test_property_sec_column_value_resolves_section():
+    result = _detect(
+        metadata_values=["Hardy"], header_values=["Policy Number", "Property Sec"],
+        data_rows=[["POL-1", "A"]],
+    )
+
+    assert result.contract_code_year == "BW01972A"
+    assert result.section == "A"
+
+
+def test_property_section_full_word_header_also_matches():
+    result = _detect(
+        metadata_values=["Hardy"], header_values=["Policy Number", "Property Section"],
+        data_rows=[["POL-1", "B"]],
+    )
+
+    assert result.contract_code_year == "BW01972B"
+
+
+def test_property_sec_column_value_not_a_configured_section_is_ignored():
+    result = _detect(
+        metadata_values=["Hardy"], header_values=["Policy Number", "Property Sec"],
+        data_rows=[["POL-1", "Z"]],
+    )
+
+    assert result.contract_code_year == "BW01972"  # base only, "Z" isn't A or B
+    assert result.section is None
+
+
+def test_property_sec_column_takes_priority_over_a_lower_tier():
+    # worksheet name alone would resolve section B, but the Property Sec column lives
+    # in the higher-priority table_columns_and_values tier and finds "A" there first -
+    # tier priority order still governs, same as every other evidence source.
+    result = _detect(
+        metadata_values=["Hardy"], header_values=["Policy Number", "Property Sec"],
+        data_rows=[["POL-1", "A"]], worksheet_name="Sec B",
+    )
+
+    assert result.contract_code_year == "BW01972A"
 
 
 # ---------------------------------------------------------------------------
