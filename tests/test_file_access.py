@@ -37,7 +37,7 @@ def test_read_filelist_rejects_unrecognized_type(tmp_path):
 
 
 def test_check_file_accessible_true_for_existing_file():
-    assert check_file_accessible(TEST_FILES_DIR / "file1_Risk_test.xlsx") is True
+    assert check_file_accessible(TEST_FILES_DIR / "Hardy_Risk_test.xlsx") is True
 
 
 def test_check_file_accessible_false_for_missing_file(tmp_path):
@@ -50,11 +50,11 @@ def test_load_password_returns_configured_string():
 
 
 def test_sample_workbooks_are_not_password_protected():
-    assert is_password_protected(TEST_FILES_DIR / "file1_Risk_test.xlsx") is False
+    assert is_password_protected(TEST_FILES_DIR / "Hardy_Risk_test.xlsx") is False
 
 
 def test_open_workbook_reads_sample_file():
-    workbook = open_workbook(TEST_FILES_DIR / "file1_Risk_test.xlsx")
+    workbook = open_workbook(TEST_FILES_DIR / "Hardy_Risk_test.xlsx")
     assert "Risk_Main" in workbook.sheetnames
 
 

@@ -5,11 +5,13 @@ import openpyxl
 
 import main
 from src.anchor_detection import load_anchor_pairs
+from src.contract_detection import load_contract_codes
 from src.file_access import FileListEntry
 from src.logging_utils import ProcessingLogger
 
 TEST_FILES_DIR = Path(__file__).resolve().parent / "test files"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "anchor_pairs.json"
+CONTRACT_CODES_PATH = Path(__file__).resolve().parent.parent / "config" / "contract_codes.json"
 
 
 def _run(monkeypatch, tmp_path, entries):
@@ -19,12 +21,13 @@ def _run(monkeypatch, tmp_path, entries):
     monkeypatch.setattr(main, "LOGS_DIR", logs_dir)
 
     anchors = load_anchor_pairs(CONFIG_PATH)
+    contract_config = load_contract_codes(CONTRACT_CODES_PATH)
     logger = ProcessingLogger.start_run(logs_dir / "processing_log.csv")
 
     worksheet_results_by_type = {"risk": [], "claims": []}
     file_summaries_by_type = {"risk": [], "claims": []}
     for entry in entries:
-        worksheet_results, file_summary = main.process_entry(entry, anchors, logger)
+        worksheet_results, file_summary = main.process_entry(entry, anchors, contract_config, logger)
         worksheet_results_by_type[entry.ingestion_type].extend(worksheet_results)
         file_summaries_by_type[entry.ingestion_type].append(file_summary)
 
@@ -47,11 +50,13 @@ def _statuses(worksheet_results):
 
 
 def test_risk_fixture_combines_into_one_workbook(tmp_path, monkeypatch):
-    entry = FileListEntry(source_file=TEST_FILES_DIR / "file1_Risk_test.xlsx", ingestion_type="risk")
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "Hardy_Risk_test.xlsx", ingestion_type="risk")
 
     output_root, csv_path, results_by_type = _run(monkeypatch, tmp_path, [entry])
 
-    output_file = output_root / "risk" / "file1_Risk_test.xlsx"
+    # both sheets resolve the same parent code (BW01972), so the combined Risk file is
+    # nested under a BW01972/ folder with the code appended to its filename too
+    output_file = output_root / "risk" / "BW01972" / "Hardy_Risk_test__BW01972.xlsx"
     assert output_file.exists()
     workbook = openpyxl.load_workbook(output_file)
     assert set(workbook.sheetnames) == {"Risk_Main", "Risk_AltAnchor"}
@@ -63,25 +68,37 @@ def test_risk_fixture_combines_into_one_workbook(tmp_path, monkeypatch):
         "Notes": "skipped_no_header",
     }
 
+    # ContractCodeYear resolved via the filename ("Hardy" -> BW01972); this contract
+    # has sections defined, but neither sheet's name/metadata mentions Sec A/Sec B.
+    risk_main = next(r for r in results_by_type["risk"] if r.worksheet_name == "Risk_Main")
+    assert risk_main.contract_code_year == "BW01972"
+
     # step-level CSV log carries granular evidence, not just a final status
     rows = _read_csv_rows(csv_path)
     anchor_steps = [r for r in rows if r["step"] == "anchor_detection" and r["worksheet_name"] == "Risk_Main"]
     assert anchor_steps[0]["status"] == "ok"
     assert "Policy Number/Inception Date" in anchor_steps[0]["detail"]
 
+    contract_steps = [r for r in rows if r["step"] == "contract_detection" and r["worksheet_name"] == "Risk_Main"]
+    assert contract_steps[0]["status"] == "ok"
+    assert "BW01972" in contract_steps[0]["detail"]
+
 
 def test_claims_fixture_combines_since_no_sheet_name_has_a_date(tmp_path, monkeypatch):
-    entry = FileListEntry(source_file=TEST_FILES_DIR / "file2_Claims_test.xlsx", ingestion_type="claims")
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "HDI_Claims_test.xlsx", ingestion_type="claims")
 
     output_root, _, results_by_type = _run(monkeypatch, tmp_path, [entry])
 
-    combined_file = output_root / "claims" / "file2_Claims_test.xlsx"
+    # both sheets resolve the same parent code (BW01973), so the combined file is
+    # nested under a BW01973/ folder with the code appended to its filename too
+    combined_file = output_root / "claims" / "BW01973" / "HDI_Claims_test__BW01973.xlsx"
     assert combined_file.exists()
     workbook = openpyxl.load_workbook(combined_file)
     assert set(workbook.sheetnames) == {"Claims_Main", "Claims_Secondary"}
 
     claims_dir = output_root / "claims"
-    assert sorted(p.name for p in claims_dir.iterdir()) == sorted(["file2_Claims_test.xlsx", "processing_log.xlsx"])
+    assert sorted(p.name for p in claims_dir.iterdir()) == sorted(["BW01973", "processing_log.xlsx"])
+    assert sorted(p.name for p in (claims_dir / "BW01973").iterdir()) == ["HDI_Claims_test__BW01973.xlsx"]
 
     assert _statuses(results_by_type["claims"]) == {
         "Claims_Main": "extracted",
@@ -90,28 +107,46 @@ def test_claims_fixture_combines_since_no_sheet_name_has_a_date(tmp_path, monkey
         "ReadMe": "skipped_no_header",
     }
 
+    # ContractCodeYear resolved via filename ("HDI" -> BW01973); no sections defined
+    claims_main = next(r for r in results_by_type["claims"] if r.worksheet_name == "Claims_Main")
+    assert claims_main.contract_code_year == "BW01973"
+
 
 def test_claims_month_name_date_in_sheet_name_gets_its_own_file(tmp_path, monkeypatch):
-    # file3_Claims_test.xlsx: same fixture as file2, except the main sheet is named
-    # "Claims_Main Aug 2026" - a month-name-style date, not the numeric ISO format.
-    entry = FileListEntry(source_file=TEST_FILES_DIR / "file3_Claims_test.xlsx", ingestion_type="claims")
+    # Synthetic fixture: one sheet named with a month-name-style date ("Aug 2026", not
+    # the numeric ISO format), one without - exercises worksheet_name_has_date's
+    # month-name regex path end-to-end. Built in-memory (like
+    # test_claims_worksheet_with_date_in_name_gets_its_own_file's ISO-date case above)
+    # rather than depending on a shared fixture file, since file3_Claims_test.xlsx is
+    # now dedicated to contract-detection section-fixture testing.
+    source_path = tmp_path / "input" / "Claims_MonthName.xlsx"
+    source_path.parent.mkdir(parents=True)
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
 
+    dated_sheet = workbook.create_sheet("Claims_Main Aug 2026")
+    dated_sheet.append(["Claim Number", "Claim Amount"])
+    dated_sheet.append(["CLM-001", 2500])
+    dated_sheet.append(["CLM-002", 7850])
+
+    no_date_sheet = workbook.create_sheet("Claims_Secondary")
+    no_date_sheet.append(["Claim Number", "Claim Amount"])
+    no_date_sheet.append(["CLM-101", 12000])
+
+    workbook.save(source_path)
+
+    entry = FileListEntry(source_file=source_path, ingestion_type="claims")
     output_root, _, results_by_type = _run(monkeypatch, tmp_path, [entry])
 
     claims_dir = output_root / "claims"
-    own_file = claims_dir / "file3_Claims_test__Claims_Main Aug 2026.xlsx"
-    combined_file = claims_dir / "file3_Claims_test.xlsx"
+    own_file = claims_dir / "Claims_MonthName__Claims_Main Aug 2026.xlsx"
+    combined_file = claims_dir / "Claims_MonthName.xlsx"
 
     assert own_file.exists()
     assert combined_file.exists()
 
     own_workbook = openpyxl.load_workbook(own_file)
     assert own_workbook.sheetnames == ["Claims_Main Aug 2026"]
-    own_ws = own_workbook["Claims_Main Aug 2026"]
-    assert [c.value for c in own_ws[1]] == [
-        "Claim Number", "Policy Number Date", "Policy Number", "Claim Amount", "Claim Amount_1", "Status", "metadata",
-    ]
-    assert own_ws.max_row == 5  # header + 4 data rows (CLM-001, 002, 003, 999)
 
     combined_workbook = openpyxl.load_workbook(combined_file)
     assert combined_workbook.sheetnames == ["Claims_Secondary"]
@@ -119,17 +154,115 @@ def test_claims_month_name_date_in_sheet_name_gets_its_own_file(tmp_path, monkey
     assert _statuses(results_by_type["claims"]) == {
         "Claims_Main Aug 2026": "extracted",
         "Claims_Secondary": "extracted",
-        "Claims_NoData": "skipped_no_data",
-        "ReadMe": "skipped_no_header",
     }
 
 
+def test_claims_sections_fixture_resolves_base_contract_and_section(tmp_path, monkeypatch):
+    # file_Claims_test.xlsx: sheets named "Section A"/"Section B". The base contract is
+    # embedded directly in the metadata's "broker ref" value ("b1262bw0197219" contains
+    # "bw01972" with no separators) - a code-style alias match doesn't require boundary
+    # isolation, so it resolves BW01972, then the sheet name supplies the section letter.
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "file_Claims_test.xlsx", ingestion_type="claims")
+
+    output_root, csv_path, results_by_type = _run(monkeypatch, tmp_path, [entry])
+
+    section_a = next(r for r in results_by_type["claims"] if r.worksheet_name == "Section A")
+    assert section_a.status == "extracted"
+    assert section_a.contract_code_year == "BW01972A"
+    assert section_a.warnings == []
+
+    # section-bearing worksheets each get their own file, named after ContractCodeYear
+    # and nested under a folder of that same name - not merged together, and not
+    # merged with the unresolved Claims_Secondary sheet (which has no code, so it stays
+    # flat at the claims/ root).
+    claims_dir = output_root / "claims"
+    assert sorted(p.name for p in claims_dir.iterdir()) == sorted([
+        "BW01972A", "BW01972B", "file_Claims_test.xlsx", "processing_log.xlsx",
+    ])
+
+    section_a_file = openpyxl.load_workbook(claims_dir / "BW01972A" / "file_Claims_test__BW01972A.xlsx")
+    assert section_a_file.sheetnames == ["Section A"]
+    ws = section_a_file["Section A"]
+    header = [c.value for c in ws[1]]
+    assert header[-2:] == ["ContractCodeYear", "metadata"]
+    assert [c.value for c in ws[2]][-2] == "BW01972A"
+
+    section_b_file = openpyxl.load_workbook(claims_dir / "BW01972B" / "file_Claims_test__BW01972B.xlsx")
+    assert section_b_file.sheetnames == ["Section B"]
+
+    combined_file = openpyxl.load_workbook(claims_dir / "file_Claims_test.xlsx")
+    assert combined_file.sheetnames == ["Claims_Secondary"]
+
+    rows = _read_csv_rows(csv_path)
+    contract_steps = [r for r in rows if r["step"] == "contract_detection" and r["worksheet_name"] == "Section A"]
+    assert contract_steps[0]["status"] == "ok"
+    assert "BW01972" in contract_steps[0]["detail"] and "section A" in contract_steps[0]["detail"]
+
+
+def test_claims_second_sections_fixture_also_splits_by_contract_code_year(tmp_path, monkeypatch):
+    # file3_Claims_test.xlsx: sheets named "Section B"/"SecA" (different naming style
+    # than file_Claims_test.xlsx's "Section A"/"Section B", same underlying rule).
+    # Claims_Secondary also carries the embedded code in its metadata but no section,
+    # so its combined-file name gets the parent code appended too - every sheet in this
+    # fixture now resolves a contract, so every output file has a code in its name.
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "file3_Claims_test.xlsx", ingestion_type="claims")
+
+    output_root, _, results_by_type = _run(monkeypatch, tmp_path, [entry])
+
+    claims_secondary = next(r for r in results_by_type["claims"] if r.worksheet_name == "Claims_Secondary")
+    assert claims_secondary.contract_code_year == "BW01972"
+    assert claims_secondary.contract_section is None
+
+    # every sheet resolves a code, so every output lands under its own BW01972*/ folder
+    claims_dir = output_root / "claims"
+    assert sorted(p.name for p in claims_dir.iterdir()) == sorted([
+        "BW01972A", "BW01972B", "BW01972", "processing_log.xlsx",
+    ])
+
+    sec_a_file = openpyxl.load_workbook(claims_dir / "BW01972A" / "file3_Claims_test__BW01972A.xlsx")
+    assert sec_a_file.sheetnames == ["SecA"]
+
+    sec_b_file = openpyxl.load_workbook(claims_dir / "BW01972B" / "file3_Claims_test__BW01972B.xlsx")
+    assert sec_b_file.sheetnames == ["Section B"]
+
+    combined_file = openpyxl.load_workbook(claims_dir / "BW01972" / "file3_Claims_test__BW01972.xlsx")
+    assert combined_file.sheetnames == ["Claims_Secondary"]
+
+
+def test_claims_worksheets_sharing_a_contract_code_year_share_one_file(tmp_path, monkeypatch):
+    # Synthetic fixture: two sheets that both resolve to the same section (BW01972A) -
+    # must land together in one output file, not overwrite each other.
+    source_path = tmp_path / "input" / "Claims_SharedSection.xlsx"
+    source_path.parent.mkdir(parents=True)
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+
+    for sheet_name in ("SecA_Batch1", "SecA_Batch2"):
+        ws = workbook.create_sheet(sheet_name)
+        ws.append(["Hardy", "SecA", None, None])
+        ws.append(["Claim Number", "Claim Amount", None, None])
+        ws.append([f"CLM-{sheet_name}", 100, None, None])
+
+    workbook.save(source_path)
+
+    entry = FileListEntry(source_file=source_path, ingestion_type="claims")
+    output_root, _, results_by_type = _run(monkeypatch, tmp_path, [entry])
+
+    statuses = {r.worksheet_name: r.contract_code_year for r in results_by_type["claims"]}
+    assert statuses == {"SecA_Batch1": "BW01972A", "SecA_Batch2": "BW01972A"}
+
+    claims_dir = output_root / "claims"
+    assert sorted(p.name for p in claims_dir.iterdir()) == sorted(["BW01972A", "processing_log.xlsx"])
+    shared_file = openpyxl.load_workbook(claims_dir / "BW01972A" / "Claims_SharedSection__BW01972A.xlsx")
+    assert set(shared_file.sheetnames) == {"SecA_Batch1", "SecA_Batch2"}
+
+
 def test_rerun_overwrites_deterministically_and_never_touches_source(tmp_path, monkeypatch):
-    entry = FileListEntry(source_file=TEST_FILES_DIR / "file1_Risk_test.xlsx", ingestion_type="risk")
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "Hardy_Risk_test.xlsx", ingestion_type="risk")
     source_bytes_before = entry.source_file.read_bytes()
 
     output_root_1, _, _ = _run(monkeypatch, tmp_path, [entry])
-    output_file = output_root_1 / "risk" / "file1_Risk_test.xlsx"
+    output_file = output_root_1 / "risk" / "BW01972" / "Hardy_Risk_test__BW01972.xlsx"
 
     output_root_2, _, _ = _run(monkeypatch, tmp_path, [entry])
 
@@ -180,8 +313,8 @@ def test_claims_worksheet_with_date_in_name_gets_its_own_file(tmp_path, monkeypa
 
 
 def test_processing_log_xlsx_written_to_each_output_folder(tmp_path, monkeypatch):
-    risk_entry = FileListEntry(source_file=TEST_FILES_DIR / "file1_Risk_test.xlsx", ingestion_type="risk")
-    claims_entry = FileListEntry(source_file=TEST_FILES_DIR / "file2_Claims_test.xlsx", ingestion_type="claims")
+    risk_entry = FileListEntry(source_file=TEST_FILES_DIR / "Hardy_Risk_test.xlsx", ingestion_type="risk")
+    claims_entry = FileListEntry(source_file=TEST_FILES_DIR / "HDI_Claims_test.xlsx", ingestion_type="claims")
 
     output_root, _, _ = _run(monkeypatch, tmp_path, [risk_entry, claims_entry])
 
@@ -199,7 +332,7 @@ def test_processing_log_xlsx_written_to_each_output_folder(tmp_path, monkeypatch
 
 
 def test_processing_log_never_written_for_a_type_with_no_files_processed(tmp_path, monkeypatch):
-    entry = FileListEntry(source_file=TEST_FILES_DIR / "file1_Risk_test.xlsx", ingestion_type="risk")
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "Hardy_Risk_test.xlsx", ingestion_type="risk")
 
     output_root, _, _ = _run(monkeypatch, tmp_path, [entry])
 
@@ -207,7 +340,7 @@ def test_processing_log_never_written_for_a_type_with_no_files_processed(tmp_pat
 
 
 def test_processing_log_csv_persists_and_accumulates_across_runs(tmp_path, monkeypatch):
-    entry = FileListEntry(source_file=TEST_FILES_DIR / "file1_Risk_test.xlsx", ingestion_type="risk")
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "Hardy_Risk_test.xlsx", ingestion_type="risk")
 
     _, csv_path_1, _ = _run(monkeypatch, tmp_path, [entry])
     _, csv_path_2, _ = _run(monkeypatch, tmp_path, [entry])

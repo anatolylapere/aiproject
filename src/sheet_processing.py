@@ -12,6 +12,7 @@ from pathlib import Path
 import openpyxl
 
 from src.anchor_detection import find_header_row
+from src.contract_detection import detect_contract_code_year
 from src.logging_utils import NULL_LOGGER
 from src.metadata_extraction import extract_metadata, join_metadata
 
@@ -45,6 +46,8 @@ class WorksheetResult:
     data: object = None
     output_path: Path = None
     validation: object = None
+    contract_code_year: str = None
+    contract_section: str = None
     warnings: list = field(default_factory=list)
     errors: list = field(default_factory=list)
 
@@ -53,9 +56,12 @@ class WorksheetResult:
 # Extraction
 # ---------------------------------------------------------------------------
 
-def process_worksheet(worksheet, worksheet_name, source_file, ingestion_type, anchor_pairs, logger=NULL_LOGGER):
-    """Detect the header, extract metadata + data, and classify the worksheet's status.
-    Logs the anchor_detection, metadata_extraction and data_extraction steps.
+def process_worksheet(
+    worksheet, worksheet_name, source_file, ingestion_type, anchor_pairs, contract_config, logger=NULL_LOGGER,
+):
+    """Detect the header, extract metadata + data, classify the worksheet's status, and
+    (for extracted tables) detect the ContractCodeYear. Logs the anchor_detection,
+    metadata_extraction, data_extraction and contract_detection steps.
     """
     header_match = find_header_row(worksheet, anchor_pairs)
     if header_match is None:
@@ -88,11 +94,25 @@ def process_worksheet(worksheet, worksheet_name, source_file, ingestion_type, an
             header_match=header_match, metadata=metadata, data=data,
         )
 
-    return WorksheetResult(
+    detection = detect_contract_code_year(
+        source_file=source_file, worksheet_name=worksheet_name, metadata=metadata,
+        header_values=header_match.header_values, data_rows=data.rows,
+        contract_config=contract_config, logger=logger, ingestion_type=ingestion_type,
+    )
+    logger.log_step(
+        source_file, ingestion_type, worksheet_name, "contract_detection",
+        "ok" if detection.status == "resolved" else detection.status, detection.detail,
+    )
+
+    result = WorksheetResult(
         source_file=source_file, ingestion_type=ingestion_type,
         worksheet_name=worksheet_name, status="extracted",
         header_match=header_match, metadata=metadata, data=data,
+        contract_code_year=detection.contract_code_year, contract_section=detection.section,
     )
+    if detection.status != "resolved":
+        result.warnings.append(detection.detail)
+    return result
 
 
 def extract_data_block(worksheet, header_match):
@@ -157,10 +177,10 @@ def dedupe_header(header_values):
     return result
 
 
-def _write_table(ws, header_values, data_rows, metadata_string):
-    ws.append(dedupe_header(header_values) + ["metadata"])
+def _write_table(ws, header_values, data_rows, metadata_string, contract_code_year):
+    ws.append(dedupe_header(header_values) + ["ContractCodeYear", "metadata"])
     for i, row in enumerate(data_rows):
-        ws.append(list(row) + [metadata_string if i == 0 else None])
+        ws.append(list(row) + [contract_code_year, metadata_string if i == 0 else None])
 
 
 def _unique_sheet_name(name, used_names):
@@ -193,7 +213,10 @@ def write_combined_workbook(output_path, worksheet_results, logger=NULL_LOGGER):
         ws = workbook.create_sheet(title=sheet_name)
 
         metadata_string = join_metadata(result.metadata)
-        _write_table(ws, result.header_match.header_values, result.data.rows, metadata_string)
+        _write_table(
+            ws, result.header_match.header_values, result.data.rows, metadata_string,
+            result.contract_code_year or "",
+        )
 
         result.output_path = output_path
         logger.log_step(result.source_file, result.ingestion_type, result.worksheet_name,

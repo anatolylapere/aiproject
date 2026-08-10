@@ -3,7 +3,10 @@ from pathlib import Path
 import openpyxl
 import pytest
 
+from src.contract_detection import load_contract_codes
+
 TEST_FILES_DIR = Path(__file__).resolve().parent / "test files"
+CONTRACT_CODES_PATH = Path(__file__).resolve().parent.parent / "config" / "contract_codes.json"
 
 
 def _load_sheet(filename, sheet_name):
@@ -13,7 +16,7 @@ def _load_sheet(filename, sheet_name):
 
 @pytest.fixture
 def risk_test_workbook():
-    return openpyxl.load_workbook(TEST_FILES_DIR / "file1_Risk_test.xlsx", data_only=True)
+    return openpyxl.load_workbook(TEST_FILES_DIR / "Hardy_Risk_test.xlsx", data_only=True)
 
 
 @pytest.fixture
@@ -23,7 +26,17 @@ def risk_main1_workbook():
 
 @pytest.fixture
 def claims_test_workbook():
-    return openpyxl.load_workbook(TEST_FILES_DIR / "file2_Claims_test.xlsx", data_only=True)
+    return openpyxl.load_workbook(TEST_FILES_DIR / "HDI_Claims_test.xlsx", data_only=True)
+
+
+@pytest.fixture
+def sections_claims_workbook():
+    return openpyxl.load_workbook(TEST_FILES_DIR / "file_Claims_test.xlsx", data_only=True)
+
+
+@pytest.fixture
+def contract_config():
+    return load_contract_codes(CONTRACT_CODES_PATH)
 
 
 @pytest.fixture

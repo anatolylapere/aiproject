@@ -90,7 +90,7 @@ def _build_granular_sheet(workbook, worksheet_results):
     ws.append([
         "Source File", "Worksheet", "Status", "Anchor Pair Used", "Rows Extracted",
         "Columns Extracted", "Validation Passed", "Failed Rules", "Output Location",
-        "Warnings", "Errors",
+        "Contract Code Year", "Warnings", "Errors",
     ])
     for result in worksheet_results:
         header_match = result.header_match
@@ -108,6 +108,7 @@ def _build_granular_sheet(workbook, worksheet_results):
             validation.passed if validation else "",
             failed_rules,
             str(result.output_path) if result.output_path else "",
+            result.contract_code_year or "",
             "; ".join(result.warnings),
             "; ".join(result.errors),
         ])

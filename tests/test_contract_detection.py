@@ -1,0 +1,253 @@
+from pathlib import Path
+
+import pytest
+
+from src.contract_detection import detect_contract_code_year, load_contract_codes
+from src.metadata_extraction import MetadataBlock
+
+CONTRACT_CODES_PATH = Path(__file__).resolve().parent.parent / "config" / "contract_codes.json"
+
+# Load once and reuse everywhere below, so these tests always exercise whatever is
+# actually configured in contract_codes.json - no hand-copied config to drift out of
+# sync with it. Current shape: BW01972 (aliases incl. "Hardy"/"CNA", sections A/B) and
+# BW01973 (aliases incl. "HDI", no sections).
+REAL_CONFIG = load_contract_codes(CONTRACT_CODES_PATH)
+
+
+def _detect(metadata_values=(), header_values=(), data_rows=(), worksheet_name="Sheet1", source_file="file.xlsx"):
+    return detect_contract_code_year(
+        source_file=Path(source_file), worksheet_name=worksheet_name,
+        metadata=MetadataBlock(values=list(metadata_values)),
+        header_values=list(header_values), data_rows=[list(r) for r in data_rows],
+        contract_config=REAL_CONFIG,
+    )
+
+
+# ---------------------------------------------------------------------------
+# load_contract_codes
+# ---------------------------------------------------------------------------
+
+def test_load_contract_codes_reads_real_config():
+    assert "BW01972" in REAL_CONFIG.contracts and "BW01973" in REAL_CONFIG.contracts
+    assert "Hardy" in REAL_CONFIG.contracts["BW01972"]["aliases"]
+    assert "A" in REAL_CONFIG.contracts["BW01972"]["sections"]
+    assert REAL_CONFIG.contracts["BW01973"].get("sections") is None
+
+
+def test_load_contract_codes_rejects_missing_contracts_key(tmp_path):
+    path = tmp_path / "contract_codes.json"
+    path.write_text('{"foo": {}}', encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_contract_codes(path)
+
+
+def test_load_contract_codes_rejects_contract_without_aliases(tmp_path):
+    path = tmp_path / "contract_codes.json"
+    path.write_text('{"contracts": {"X": {"name": "Y"}}}', encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_contract_codes(path)
+
+
+def test_load_contract_codes_rejects_section_without_aliases(tmp_path):
+    path = tmp_path / "contract_codes.json"
+    path.write_text('{"contracts": {"X": {"aliases": ["X"], "sections": {"A": {}}}}}', encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_contract_codes(path)
+
+
+# ---------------------------------------------------------------------------
+# detect_contract_code_year: single-tier matches
+# ---------------------------------------------------------------------------
+
+def test_metadata_tier_match():
+    result = _detect(metadata_values=["Broker", "Hardy Ltd"])
+
+    assert result.contract_code_year == "BW01972"
+    assert result.status == "resolved"
+    assert result.tier == "metadata"
+
+
+def test_table_column_tier_match():
+    result = _detect(header_values=["Claim Number", "HDI Premium"])
+
+    assert result.contract_code_year == "BW01973"
+    assert result.tier == "table_columns_and_values"
+
+
+def test_table_data_value_tier_match():
+    result = _detect(header_values=["Claim Number", "Status"], data_rows=[["CLM-1", "HDI"]])
+
+    assert result.contract_code_year == "BW01973"
+    assert result.tier == "table_columns_and_values"
+
+
+def test_worksheet_name_tier_match():
+    result = _detect(worksheet_name="CNA Claims")
+
+    assert result.contract_code_year == "BW01972"
+    assert result.tier == "worksheet_name"
+
+
+def test_filename_tier_match():
+    result = _detect(source_file="Hardy_Risk_test.xlsx")
+
+    assert result.contract_code_year == "BW01972"
+    assert result.tier == "filename"
+
+
+# ---------------------------------------------------------------------------
+# tier priority: metadata > columns/values > worksheet name > filename
+# ---------------------------------------------------------------------------
+
+def test_metadata_tier_wins_over_conflicting_filename():
+    # filename says Hardy (BW01972), metadata says HDI (BW01973) - metadata wins,
+    # and the filename evidence is never even consulted.
+    result = _detect(metadata_values=["HDI"], source_file="Hardy_Risk_test.xlsx")
+
+    assert result.contract_code_year == "BW01973"
+    assert result.tier == "metadata"
+
+
+def test_columns_tier_only_consulted_when_metadata_has_no_match():
+    result = _detect(metadata_values=["Broker", "Acme"], header_values=["HDI Premium"])
+
+    assert result.contract_code_year == "BW01973"
+    assert result.tier == "table_columns_and_values"
+
+
+# ---------------------------------------------------------------------------
+# code-style alias matching: contains-match (no boundary) since the code itself is
+# specific enough on its own - mirrors file_Claims_test.xlsx's "broker ref" value,
+# where the contract code is embedded directly in a longer reference string with no
+# separators. Word aliases (no digits, e.g. "Hardy"/"CNA") still require isolation.
+# ---------------------------------------------------------------------------
+
+def test_code_style_alias_matches_even_when_embedded_in_a_longer_token():
+    result = _detect(metadata_values=["broker ref", "b1262bw0197219"])
+
+    assert result.contract_code_year == "BW01972"
+    assert result.tier == "metadata"
+
+
+def test_word_alias_still_requires_isolation_when_embedded_in_a_longer_token():
+    # "Hardy" glued directly onto other letters (no separator) must NOT match -
+    # word aliases keep the boundary protection the code-style ones no longer have.
+    result = _detect(metadata_values=["xHardyx"])
+
+    assert result.status == "not_found"
+
+
+def test_word_alias_as_isolated_token_within_longer_string_does_match():
+    # contrast with the case above: filename tokens ARE isolated by "_" and must match.
+    result = _detect(source_file="Hardy_Risk_test.xlsx")
+
+    assert result.contract_code_year == "BW01972"
+
+
+def test_code_that_does_not_appear_at_all_still_does_not_match():
+    # specificity still matters: a code with genuinely different digits must not match
+    # just because it shares a prefix with the real one.
+    result = _detect(metadata_values=["BW01975"])
+
+    assert result.status == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# section resolution
+# ---------------------------------------------------------------------------
+
+def test_section_resolved_via_worksheet_name():
+    result = _detect(metadata_values=["Hardy"], worksheet_name="Claims Sec B 2026")
+
+    assert result.contract_code_year == "BW01972B"
+    assert result.status == "resolved"
+
+
+def test_section_not_applicable_when_contract_has_no_sections():
+    result = _detect(metadata_values=["HDI"], worksheet_name="Section A")
+
+    assert result.contract_code_year == "BW01973"
+
+
+def test_no_section_evidence_anywhere_yields_base_code_only():
+    result = _detect(metadata_values=["Hardy"], worksheet_name="Risk_Main", source_file="Hardy_Risk_test.xlsx")
+
+    assert result.contract_code_year == "BW01972"
+
+
+def test_section_ambiguous_within_a_tier_drops_section_but_keeps_base():
+    result = _detect(metadata_values=["Hardy"], worksheet_name="Section A and Section B")
+
+    assert result.contract_code_year == "BW01972"
+    assert result.status == "resolved"
+    assert "ambiguous" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# base contract unresolved: not_found / ambiguous
+# ---------------------------------------------------------------------------
+
+def test_base_not_found_when_no_tier_matches():
+    # mirrors file_Claims_test.xlsx's "Section A" sheet: section-shaped sheet name,
+    # but no base-contract evidence anywhere.
+    result = _detect(
+        metadata_values=["Client", "Example Insurance Ltd"], worksheet_name="Section A",
+        source_file="file_Claims_test.xlsx",
+    )
+
+    assert result.status == "not_found"
+    assert result.contract_code_year == ""
+    assert "no contract evidence found" in result.detail
+
+
+def test_base_ambiguous_when_a_tier_matches_two_contracts():
+    result = _detect(metadata_values=["Hardy", "HDI"])
+
+    assert result.status == "ambiguous"
+    assert result.contract_code_year == ""
+    assert "BW01972" in result.detail and "BW01973" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# numeric code+year pattern: digit-core + exactly two more digits.
+# BW01972 -> digit-core "1972" (leading zero of "01972" dropped), so a matching
+# numeric value looks like "197225" - the actual real-world case that motivated this
+# rule: file1_Risk_test1.xlsx's "Broker Ref: 197225" metadata value.
+# ---------------------------------------------------------------------------
+
+def test_numeric_pattern_matches_a_pure_number_metadata_value():
+    result = _detect(metadata_values=["Broker Ref", 197225])
+
+    assert result.contract_code_year == "BW01972"
+    assert result.tier == "metadata"
+
+
+def test_numeric_pattern_matches_within_a_longer_text_value():
+    result = _detect(metadata_values=["Ref: 197225"])
+
+    assert result.contract_code_year == "BW01972"
+
+
+def test_numeric_pattern_applies_to_filename_tier_too():
+    result = _detect(source_file="Claims_197225_Aug.xlsx")
+
+    assert result.contract_code_year == "BW01972"
+    assert result.tier == "filename"
+
+
+def test_numeric_pattern_requires_two_trailing_digits():
+    # the digit-core alone, with nothing after it, must not match
+    result = _detect(metadata_values=[1972])
+
+    assert result.status == "not_found"
+
+
+def test_numeric_pattern_does_not_match_embedded_in_a_longer_digit_run():
+    # digit-core+2 sits inside a longer unbroken digit run - must not match, same
+    # protection validated against the real decoy fixture ("b1262bw0197219")
+    result = _detect(metadata_values=["0197225"])
+
+    assert result.status == "not_found"

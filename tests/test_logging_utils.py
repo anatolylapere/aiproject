@@ -99,7 +99,9 @@ def test_validate_table_with_default_logger_does_not_raise():
 # build_processing_log_workbook: per-output-folder processing_log.xlsx
 # ---------------------------------------------------------------------------
 
-def _extracted_result(source_file, worksheet_name, header_values, matched_pair_cols, row_count, passed=True):
+def _extracted_result(
+    source_file, worksheet_name, header_values, matched_pair_cols, row_count, passed=True, contract_code_year="",
+):
     header_match = HeaderMatch(
         row_index=1, start_col=1, end_col=len(header_values), header_values=header_values,
         matched_pair=("A", "B"), matched_pair_cols=matched_pair_cols, occurrence_rows=[1],
@@ -110,7 +112,7 @@ def _extracted_result(source_file, worksheet_name, header_values, matched_pair_c
     return WorksheetResult(
         source_file=source_file, ingestion_type="risk", worksheet_name=worksheet_name,
         status="extracted", header_match=header_match, data=data, validation=validation,
-        output_path=Path(f"output/risk/{source_file}"),
+        output_path=Path(f"output/risk/{source_file}"), contract_code_year=contract_code_year,
     )
 
 
@@ -134,6 +136,24 @@ def test_granular_sheet_includes_every_worksheet_regardless_of_outcome():
     assert sheet_names == ["Main", "Notes", "NoData"]
     statuses = [row[2].value for row in ws.iter_rows(min_row=2)]
     assert statuses == ["extracted", "skipped_no_header", "skipped_no_data"]
+
+
+def test_granular_sheet_records_contract_code_year_for_traceability():
+    results = [
+        _extracted_result(
+            "f1.xlsx", "Main", ["Policy Number", "Premium"], {"A": 1, "B": 2}, 2, contract_code_year="BW0197221A",
+        ),
+        _skipped_result("f1.xlsx", "Notes", "skipped_no_header"),
+    ]
+
+    workbook = build_processing_log_workbook([{"source_file": "f1.xlsx", "opened_ok": True, "password_required": False}], results)
+
+    ws = workbook["Granular"]
+    header = [c.value for c in ws[1]]
+    assert "Contract Code Year" in header
+    contract_col = header.index("Contract Code Year")
+    values = [row[contract_col].value for row in ws.iter_rows(min_row=2)]
+    assert values == ["BW0197221A", ""]  # skipped worksheet never ran detection - blank
 
 
 def test_overview_sheet_counts_files_and_worksheet_statuses():

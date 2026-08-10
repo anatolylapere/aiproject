@@ -84,24 +84,31 @@ def test_claims_secondary_three_rows(claims_test_workbook, claims_anchor_pairs):
 # process_worksheet: status classification
 # ---------------------------------------------------------------------------
 
-def test_process_worksheet_extracted(risk_test_workbook, risk_anchor_pairs):
+def test_process_worksheet_extracted(risk_test_workbook, risk_anchor_pairs, contract_config):
     ws = risk_test_workbook["Risk_Main"]
-    result = process_worksheet(ws, "Risk_Main", Path("file1_Risk_Input.xlsx"), "risk", risk_anchor_pairs)
+    result = process_worksheet(
+        ws, "Risk_Main", Path("Hardy_Risk_test.xlsx"), "risk", risk_anchor_pairs, contract_config,
+    )
 
     assert result.status == "extracted"
     assert result.data.row_count == 4
+    assert result.contract_code_year == "BW01972"  # resolved via filename ("Hardy")
 
 
-def test_process_worksheet_skipped_no_data(risk_test_workbook, risk_anchor_pairs):
+def test_process_worksheet_skipped_no_data(risk_test_workbook, risk_anchor_pairs, contract_config):
     ws = risk_test_workbook["Risk_NoData"]
-    result = process_worksheet(ws, "Risk_NoData", Path("file1_Risk_Input.xlsx"), "risk", risk_anchor_pairs)
+    result = process_worksheet(
+        ws, "Risk_NoData", Path("Hardy_Risk_test.xlsx"), "risk", risk_anchor_pairs, contract_config,
+    )
 
     assert result.status == "skipped_no_data"
 
 
-def test_process_worksheet_skipped_no_header(risk_test_workbook, risk_anchor_pairs):
+def test_process_worksheet_skipped_no_header(risk_test_workbook, risk_anchor_pairs, contract_config):
     ws = risk_test_workbook["Notes"]
-    result = process_worksheet(ws, "Notes", Path("file1_Risk_Input.xlsx"), "risk", risk_anchor_pairs)
+    result = process_worksheet(
+        ws, "Notes", Path("Hardy_Risk_test.xlsx"), "risk", risk_anchor_pairs, contract_config,
+    )
 
     assert result.status == "skipped_no_header"
 
@@ -147,7 +154,7 @@ def test_worksheet_name_has_date(name, expected):
 # write_combined_workbook: grouping, metadata column, header dedup, overwrite
 # ---------------------------------------------------------------------------
 
-def _make_result(worksheet_name, header_values, matched_pair_cols, data_rows, metadata_values):
+def _make_result(worksheet_name, header_values, matched_pair_cols, data_rows, metadata_values, contract_code_year=""):
     header_match = HeaderMatch(
         row_index=1, start_col=1, end_col=len(header_values), header_values=header_values,
         matched_pair=("A", "B"), matched_pair_cols=matched_pair_cols, occurrence_rows=[1],
@@ -157,13 +164,14 @@ def _make_result(worksheet_name, header_values, matched_pair_cols, data_rows, me
     return WorksheetResult(
         source_file=Path("src.xlsx"), ingestion_type="risk", worksheet_name=worksheet_name,
         status="extracted", header_match=header_match, metadata=metadata, data=data,
+        contract_code_year=contract_code_year,
     )
 
 
 def test_write_combined_workbook_single_result_is_one_sheet(tmp_path):
     result = _make_result(
         "Risk_Main", ["Policy Number", "Premium", "Premium"], {"A": 1, "B": 2},
-        [["POL-1", 100, 10], ["POL-2", 200, 20]], ["Broker", "Acme"],
+        [["POL-1", 100, 10], ["POL-2", 200, 20]], ["Broker", "Acme"], contract_code_year="BW0197221A",
     )
     output_path = tmp_path / "out.xlsx"
 
@@ -173,9 +181,9 @@ def test_write_combined_workbook_single_result_is_one_sheet(tmp_path):
     workbook = openpyxl.load_workbook(output_path)
     assert workbook.sheetnames == ["Risk_Main"]
     ws = workbook["Risk_Main"]
-    assert [c.value for c in ws[1]] == ["Policy Number", "Premium", "Premium_1", "metadata"]
-    assert [c.value for c in ws[2]] == ["POL-1", 100, 10, "Broker|Acme"]
-    assert [c.value for c in ws[3]] == ["POL-2", 200, 20, None]
+    assert [c.value for c in ws[1]] == ["Policy Number", "Premium", "Premium_1", "ContractCodeYear", "metadata"]
+    assert [c.value for c in ws[2]] == ["POL-1", 100, 10, "BW0197221A", "Broker|Acme"]
+    assert [c.value for c in ws[3]] == ["POL-2", 200, 20, "BW0197221A", None]
 
 
 def test_write_combined_workbook_multiple_results_multiple_sheets(tmp_path):
