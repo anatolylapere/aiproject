@@ -39,4 +39,4 @@ Thumbs.db
 .idea/
 
 config/
-test/
+tests/
