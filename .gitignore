@@ -40,3 +40,7 @@ Thumbs.db
 
 config/
 tests/
+
+/CLAUDE.md
+
+/pytest.ini
