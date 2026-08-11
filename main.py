@@ -11,7 +11,7 @@ from pathlib import Path
 
 from src import file_access
 from src.anchor_detection import load_anchor_pairs
-from src.contract_detection import load_contract_codes
+from src.contract_detection import LEGAL_EXPENSES_CODE, load_contract_codes
 from src.logging_utils import ProcessingLogger, build_processing_log_workbook
 from src.sheet_processing import (
     is_risk_filename, process_worksheet, worksheet_name_has_date, write_combined_workbook,
@@ -109,29 +109,37 @@ def _write_grouped(base_dir, filename_stem, results, logger):
 
 
 def _write_sectioned_groups(base_dir, stem, results, logger):
-    """Write every result with a resolved section to its own file, grouped by exact
-    ContractCodeYear (so worksheets sharing a section share a file). Returns the
-    remaining (non-sectioned) results for the caller to combine/split further.
+    """Write every result that must be grouped independently of the rest of its source
+    file to its own file, grouped by exact ContractCodeYear (so worksheets sharing a
+    section/code share a file): either a result with a resolved section, or one that
+    resolved to BW05407 (Legal Expenses, which always gets its own folder even when
+    other sheets in the same source file resolve to a different code - see
+    contract_detection.py's legal_expenses_override). Returns the remaining results for
+    the caller to combine/split further.
     """
-    sectioned = [r for r in results if r.contract_section is not None]
+    independent = [
+        r for r in results
+        if r.contract_section is not None or r.contract_code_year == LEGAL_EXPENSES_CODE
+    ]
     groups = {}
-    for result in sectioned:
+    for result in independent:
         groups.setdefault(result.contract_code_year, []).append(result)
     for group in groups.values():
         _write_grouped(base_dir, stem, group, logger)
-    return [r for r in results if r not in sectioned]
+    return [r for r in results if r not in independent]
 
 
 def write_outputs(entry, worksheet_results, logger):
     """Write extracted+validated tables to output/{risk|premium|claims}/ (asymmetric
     grouping per the approved plan). Both Risk (split into output/risk/ or
     output/premium/ by a filename keyword check) and Claims split out section-bearing
-    worksheets (grouped by ContractCodeYear, so worksheets sharing a section share a
-    file) into their own files first; Claims additionally splits date-named worksheets
-    into their own files. Whatever's left combines into one file per source file. A
-    worksheet that is both section-bearing and date-named is claimed by the section
-    group first. Any output whose sheets agree on a single contract code is nested
-    under a {code}/ folder and has that code appended to its filename.
+    worksheets, and worksheets resolved to BW05407 (Legal Expenses), into their own
+    files first (grouped by ContractCodeYear, so worksheets sharing a section/code
+    share a file - see _write_sectioned_groups); Claims additionally splits date-named
+    worksheets into their own files. Whatever's left combines into one file per source
+    file. A worksheet that is both independently-grouped and date-named is claimed by
+    the independent group first. Any output whose sheets agree on a single contract
+    code is nested under a {code}/ folder and has that code appended to its filename.
     """
     passed = [r for r in worksheet_results if r.status == "extracted" and r.validation.passed]
     failed = [r for r in worksheet_results if r.status == "extracted" and not r.validation.passed]

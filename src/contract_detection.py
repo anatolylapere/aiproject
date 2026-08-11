@@ -34,6 +34,15 @@ from table evidence (header and data cells alike) - unlike structured reference 
 they hold arbitrary human-written text prone to coincidentally matching an unrelated
 contract's alias and producing false ambiguity. This does not affect what gets
 extracted/written to output - only what counts as detection evidence.
+
+BW01972-specific special case, checked before the row-by-row fallback above: if
+'Property Sec'/'Property Section'/'Section No'/'Sec No'/'Section'/'Property' reads 'C'
+(or 'Section C'/'Sec C') on every row, the sheet is reclassified entirely to BW05407
+(Legal Expenses) - irrespective of Province, which is never consulted once this
+triggers. Only whole-sheet agreement triggers it; a mix of 'C' and other values falls
+through to normal section resolution untouched. Any result resolving to BW05407 (via
+this override or otherwise) is also grouped into its own output folder independently
+of the rest of its source file - see main.py's _write_sectioned_groups.
 """
 
 import json
@@ -170,6 +179,50 @@ _PROVINCE_TO_SECTION = {
 
 def _province_value(raw):
     return _PROVINCE_TO_SECTION.get(raw.strip().lower())
+
+
+_LEGAL_EXPENSES_TRIGGER_CONTRACT = "BW01972"
+LEGAL_EXPENSES_CODE = "BW05407"  # public: main.py groups any result resolving to this
+# code into its own output folder, independently of what else shares its source file -
+# same treatment as a resolved section.
+_LEGAL_EXPENSES_COLUMN_NAMES = {
+    "property sec", "property section", "section no", "sec no", "section", "property",
+}
+
+
+def _is_legal_expenses_value(raw):
+    """'C', 'Section C', 'Sec C' (case-insensitive, trimmed) all count."""
+    normalized = raw.strip().lower()
+    for prefix in ("section ", "sec "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+            break
+    return normalized == "c"
+
+
+def _legal_expenses_override(header_values, data_rows, data_row_numbers, start_col):
+    """BW01972-specific special case: if a 'Property Sec'/'Property Section'/'Section
+    No'/'Sec No'/'Section'/'Property' column reads 'C' (or 'Section C'/'Sec C') on
+    every row, the sheet doesn't belong to a section of BW01972 at all - it's actually
+    a different contract, BW05407 (Legal Expenses), irrespective of Province (never
+    consulted once this triggers). Only whole-sheet agreement triggers it; if the
+    column exists but isn't uniformly 'C', this returns None and normal section
+    resolution proceeds untouched.
+    """
+    idx = _column_index(header_values, _LEGAL_EXPENSES_COLUMN_NAMES)
+    if idx is None:
+        return None
+
+    row_numbers = data_row_numbers if len(data_row_numbers) == len(data_rows) else [None] * len(data_rows)
+    first_cell = None
+    for row, row_num in zip(data_rows, row_numbers):
+        value = row[idx] if idx < len(row) else None
+        if value is None or not _is_legal_expenses_value(str(value)):
+            return None
+        if first_cell is None:
+            col = (start_col + idx) if start_col is not None else None
+            first_cell = _cell_ref(col, row_num)
+    return first_cell
 
 
 def _column_index(header_values, names):
@@ -330,6 +383,24 @@ def detect_contract_code_year(
                     f"{matched_sections} - section dropped"
                 ),
                 base_code=code,
+            )
+
+    # 1.5) BW01972-specific special case: a Property Sec/Property Section/Section No/
+    # Sec No/Section/Property column reading 'C' (or 'Section C'/'Sec C') on every row
+    # means the sheet is really BW05407 (Legal Expenses), not a section of BW01972 -
+    # checked before the normal row-based fallback below since it reads the very same
+    # columns.
+    if code == _LEGAL_EXPENSES_TRIGGER_CONTRACT:
+        override_cell = _legal_expenses_override(header_values, data_rows, data_row_numbers, start_col)
+        if override_cell is not None:
+            return ContractDetectionResult(
+                contract_code_year=LEGAL_EXPENSES_CODE, status="resolved",
+                tier=f"{base_tier}+legal_expenses_override",
+                detail=(
+                    f"matched {code} via {base_tier} ({base_cell}); reclassified to "
+                    f"{LEGAL_EXPENSES_CODE} (Legal Expenses) via legal_expenses_override ({override_cell})"
+                ),
+                base_code=LEGAL_EXPENSES_CODE,
             )
 
     # 2) last resort, only reached if every phrase tier came up empty: 'Property Sec'/
