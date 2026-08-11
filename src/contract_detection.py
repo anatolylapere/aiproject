@@ -19,6 +19,12 @@ from ('A1'-style, or '(worksheet name)'/'(filename)'/'(metadata)' where there's 
 single cell) - surfaced in ContractDetectionResult.detail, including the ambiguous-
 match warning, e.g. "multiple contracts matched in table_columns_and_values:
 {'BW01972': 'G6', 'BW05407': 'C12'}".
+
+Free-text narrative columns ('Loss Details', 'Loss Description') are excluded entirely
+from table evidence (header and data cells alike) - unlike structured reference fields,
+they hold arbitrary human-written text prone to coincidentally matching an unrelated
+contract's alias and producing false ambiguity. This does not affect what gets
+extracted/written to output - only what counts as detection evidence.
 """
 
 import json
@@ -168,17 +174,31 @@ def _metadata_evidence(metadata):
     return [(str(v), cell or "(metadata)") for v, cell in zip(metadata.values, cells)]
 
 
+_EXCLUDED_EVIDENCE_COLUMNS = {"loss details", "loss description"}
+
+
 def _table_evidence(header_values, data_rows, header_row, start_col, data_row_numbers):
+    """Free-text narrative columns (Loss Details/Loss Description) are excluded
+    entirely, header and data cells alike - unlike structured reference fields
+    (Agreement Number, Broker Ref), they hold arbitrary human-written text that's
+    prone to coincidentally matching an unrelated contract's alias, producing false
+    'multiple contracts matched' ambiguity instead of genuine evidence.
+    """
+    excluded_cols = {
+        idx for idx, v in enumerate(header_values)
+        if v is not None and str(v).strip().lower() in _EXCLUDED_EVIDENCE_COLUMNS
+    }
+
     evidence = []
     for idx, v in enumerate(header_values):
-        if v is not None:
+        if v is not None and idx not in excluded_cols:
             col = (start_col + idx) if start_col is not None else None
             evidence.append((str(v), _cell_ref(col, header_row)))
 
     row_numbers = data_row_numbers if len(data_row_numbers) == len(data_rows) else [None] * len(data_rows)
     for row, row_num in zip(data_rows, row_numbers):
         for idx, v in enumerate(row):
-            if v is not None:
+            if v is not None and idx not in excluded_cols:
                 col = (start_col + idx) if start_col is not None else None
                 evidence.append((str(v), _cell_ref(col, row_num)))
     return evidence

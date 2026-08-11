@@ -317,6 +317,58 @@ def test_worksheet_name_and_filename_matches_report_a_placeholder_not_a_cell():
 
 
 # ---------------------------------------------------------------------------
+# "Loss Details"/"Loss Description" columns: free-text narrative, excluded entirely
+# from table evidence (header + data) so coincidental alias matches in prose don't
+# produce false "multiple contracts matched" ambiguity.
+# ---------------------------------------------------------------------------
+
+def test_loss_description_column_excluded_from_evidence():
+    # without the exclusion, "HDI" in the narrative column would conflict with the
+    # genuine Agreement Number evidence (BW01972) and make this ambiguous
+    result = _detect(
+        header_values=["Agreement Number", "Loss Description"],
+        data_rows=[["BW01972", "Reviewed by HDI liaison team"]],
+    )
+
+    assert result.status == "resolved"
+    assert result.contract_code_year == "BW01972"
+
+
+def test_loss_details_column_also_excluded():
+    result = _detect(
+        header_values=["Agreement Number", "Loss Details"],
+        data_rows=[["BW01972", "Reviewed by HDI liaison team"]],
+    )
+
+    assert result.status == "resolved"
+    assert result.contract_code_year == "BW01972"
+
+
+def test_without_exclusion_this_would_have_been_ambiguous():
+    # control case: same conflicting-contract narrative text, but under a column name
+    # NOT on the exclusion list - proves the ambiguity is real (Agreement Number says
+    # BW01972, the narrative coincidentally says HDI/BW01973) and the exclusion in the
+    # tests above is what's actually preventing it, not some other difference.
+    result = _detect(
+        header_values=["Agreement Number", "Adjuster Notes"],
+        data_rows=[["BW01972", "Reviewed by HDI liaison team"]],
+    )
+
+    assert result.status == "ambiguous"
+
+
+def test_loss_description_column_name_matching_is_case_insensitive_and_trimmed():
+    # column name matching is case-insensitive/trimmed, same as Property Sec elsewhere
+    result = _detect(
+        header_values=["Agreement Number", " loss description "],
+        data_rows=[["BW01972", "Mentions HDI in passing"]],
+    )
+
+    assert result.status == "resolved"
+    assert result.contract_code_year == "BW01972"
+
+
+# ---------------------------------------------------------------------------
 # numeric code+year pattern: digit-core + exactly two more digits.
 # BW01972 -> digit-core "1972" (leading zero of "01972" dropped), so a matching
 # numeric value looks like "197225" - the actual real-world case that motivated this

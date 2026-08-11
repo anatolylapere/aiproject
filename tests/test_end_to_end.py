@@ -288,28 +288,30 @@ def test_claims_second_sections_fixture_also_splits_by_contract_code_year(tmp_pa
 
 def test_claims_code_row_above_header_is_ignored_as_metadata(tmp_path, monkeypatch):
     # Bw0197222 claims.xlsx: row 1 above the header is an internal "CR001..CR007" field
-    # code row (dropped like a blank row - only 1 non-empty cell in row 2 below it, well
-    # under the 3-cell code-row threshold, so row 2 is kept as real metadata). Row 2's
-    # "BW0197322" is BW01973's code (ends ...-7-3-2-2, not BW01972's ...-7-2), and since
-    # metadata is the highest-priority tier, it resolves the contract before the table's
-    # Agreement Number column (BW0197222 -> BW01972) is ever consulted - a different
-    # contract than the Agreement Number column or filename would suggest on their own.
+    # code row (dropped like a blank row - nothing else above the header, so metadata is
+    # empty). Base resolves via the Agreement Number column (BW0197222 -> BW01972). The
+    # sheet also has a "Loss Description" column with free text ("Legal expense Claim")
+    # that doesn't coincidentally match any configured alias, so it doesn't affect the
+    # result either way - see tests/test_contract_detection.py's
+    # test_loss_description_column_excluded_from_evidence for a case where free text
+    # WOULD cause a false ambiguity without the exclusion.
     entry = FileListEntry(source_file=TEST_FILES_DIR / "Bw0197222 claims.xlsx", ingestion_type="claims")
 
     output_root, _, results_by_type = _run(monkeypatch, tmp_path, [entry])
 
     claims_main = next(r for r in results_by_type["claims"] if r.worksheet_name == "Claims_Main")
-    assert claims_main.contract_code_year == "BW01973"
-    assert claims_main.metadata.values == ["BW0197322"]  # CR0 code row dropped, row 2 kept
+    assert claims_main.contract_code_year == "BW01972"
+    assert claims_main.metadata.values == []  # CR0 code row dropped, nothing else above the header
     assert claims_main.warnings == []  # resolved cleanly, no warning
 
-    output_file = output_root / "claims" / "BW01973" / "Bw0197222 claims__BW01973.xlsx"
+    output_file = output_root / "claims" / "BW01972" / "Bw0197222 claims__BW01972.xlsx"
     assert output_file.exists()
     workbook = openpyxl.load_workbook(output_file)
     ws = workbook["Claims_Main"]
     header = [c.value for c in ws[1]]
+    assert "Loss Description" in header  # still extracted/written - only excluded from evidence
     assert header[-1] == "metadata"
-    assert [c.value for c in ws[2]][-1] == "BW0197322"
+    assert [c.value for c in ws[2]][-1] is None  # no metadata string
 
 
 def test_claims_worksheets_sharing_a_contract_code_year_share_one_file(tmp_path, monkeypatch):
