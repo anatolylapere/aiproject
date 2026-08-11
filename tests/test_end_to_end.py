@@ -286,6 +286,28 @@ def test_claims_second_sections_fixture_also_splits_by_contract_code_year(tmp_pa
     assert combined_file.sheetnames == ["Claims_Secondary"]
 
 
+def test_claims_code_row_above_header_is_ignored_as_metadata(tmp_path, monkeypatch):
+    # Bw0197222 claims.xlsx: row 1 above the header is an internal "CR001..CR007" field
+    # code row, not real metadata - dropped like a blank row, but the Agreement Number
+    # column (BW0197222, embedding the BW01972 code) still resolves the contract as
+    # before, since that evidence lives in the table, not the metadata row.
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "Bw0197222 claims.xlsx", ingestion_type="claims")
+
+    output_root, _, results_by_type = _run(monkeypatch, tmp_path, [entry])
+
+    claims_main = next(r for r in results_by_type["claims"] if r.worksheet_name == "Claims_Main")
+    assert claims_main.contract_code_year == "BW01972"
+    assert claims_main.metadata.values == []  # CR0 code row dropped, nothing else above the header
+
+    output_file = output_root / "claims" / "BW01972" / "Bw0197222 claims__BW01972.xlsx"
+    assert output_file.exists()
+    workbook = openpyxl.load_workbook(output_file)
+    ws = workbook["Claims_Main"]
+    header = [c.value for c in ws[1]]
+    assert header[-1] == "metadata"
+    assert [c.value for c in ws[2]][-1] is None  # no metadata string - openpyxl reloads "" as None
+
+
 def test_claims_worksheets_sharing_a_contract_code_year_share_one_file(tmp_path, monkeypatch):
     # Synthetic fixture: two sheets that both resolve to the same section (BW01972A) -
     # must land together in one output file, not overwrite each other.
