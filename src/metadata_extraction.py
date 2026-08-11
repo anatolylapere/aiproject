@@ -1,6 +1,8 @@
 """Extraction of metadata content above a detected header row."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from openpyxl.utils import get_column_letter
 
 _CODE_ROW_PREFIX = "cr0"
 _CODE_ROW_MIN_CELLS = 3
@@ -9,6 +11,7 @@ _CODE_ROW_MIN_CELLS = 3
 @dataclass
 class MetadataBlock:
     values: list
+    cells: list = field(default_factory=list)  # "A1"-style ref per value, same order/length as values
 
 
 def _is_code_row(row_values):
@@ -31,13 +34,17 @@ def extract_metadata(worksheet, header_row_index):
     pairing - rows may carry any number of non-empty cells.
     """
     values = []
+    cells = []
     max_col = worksheet.max_column
     for row_index in range(1, header_row_index):
         row_values = [worksheet.cell(row=row_index, column=col).value for col in range(1, max_col + 1)]
         if _is_code_row(row_values):
             continue
-        values.extend(v for v in row_values if v is not None)
-    return MetadataBlock(values=values)
+        for col, value in enumerate(row_values, start=1):
+            if value is not None:
+                values.append(value)
+                cells.append(f"{get_column_letter(col)}{row_index}")
+    return MetadataBlock(values=values, cells=cells)
 
 
 def join_metadata(metadata_block):

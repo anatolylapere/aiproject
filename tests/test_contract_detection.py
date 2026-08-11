@@ -14,11 +14,17 @@ CONTRACT_CODES_PATH = Path(__file__).resolve().parent.parent / "config" / "contr
 REAL_CONFIG = load_contract_codes(CONTRACT_CODES_PATH)
 
 
-def _detect(metadata_values=(), header_values=(), data_rows=(), worksheet_name="Sheet1", source_file="file.xlsx"):
+def _detect(
+    metadata_values=(), header_values=(), data_rows=(), worksheet_name="Sheet1", source_file="file.xlsx",
+    metadata_cells=(),
+):
+    header_values = list(header_values)
+    data_rows = [list(r) for r in data_rows]
     return detect_contract_code_year(
         source_file=Path(source_file), worksheet_name=worksheet_name,
-        metadata=MetadataBlock(values=list(metadata_values)),
-        header_values=list(header_values), data_rows=[list(r) for r in data_rows],
+        metadata=MetadataBlock(values=list(metadata_values), cells=list(metadata_cells)),
+        header_values=header_values, data_rows=data_rows,
+        header_row=5, start_col=1, data_row_numbers=list(range(6, 6 + len(data_rows))),
         contract_config=REAL_CONFIG,
     )
 
@@ -180,6 +186,7 @@ def test_section_not_applicable_when_contract_has_no_sections():
     result = detect_contract_code_year(
         source_file=Path("file.xlsx"), worksheet_name="Section A",
         metadata=MetadataBlock(values=["XCorp"]), header_values=[], data_rows=[],
+        header_row=5, start_col=1, data_row_numbers=[],
         contract_config=config,
     )
 
@@ -270,6 +277,43 @@ def test_base_ambiguous_when_a_tier_matches_two_contracts():
     assert result.status == "ambiguous"
     assert result.contract_code_year == ""
     assert "BW01972" in result.detail and "BW01973" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# ambiguity reporting includes the specific cell each code was matched in
+# ---------------------------------------------------------------------------
+
+def test_ambiguous_metadata_match_reports_each_codes_cell():
+    result = _detect(
+        metadata_values=["Hardy", "HDI"], metadata_cells=["B1", "B3"],
+    )
+
+    assert result.status == "ambiguous"
+    assert "{'BW01972': 'B1', 'BW01973': 'B3'}" in result.detail
+
+
+def test_ambiguous_table_match_reports_each_codes_cell():
+    # header row 5, start_col 1 (per _detect's defaults): "Hardy" in column A of the
+    # header (A5), "HDI" in column B of the first data row (B6, since data starts row 6)
+    result = _detect(header_values=["Claim Number", "Hardy"], data_rows=[["CLM-1", "HDI"]])
+
+    assert result.status == "ambiguous"
+    assert "{'BW01972': 'B5', 'BW01973': 'B6'}" in result.detail
+
+
+def test_resolved_match_detail_includes_the_matched_cell():
+    result = _detect(metadata_values=["Broker", "Hardy Ltd"], metadata_cells=["A1", "B1"])
+
+    assert result.contract_code_year == "BW01972"
+    assert "(B1)" in result.detail
+
+
+def test_worksheet_name_and_filename_matches_report_a_placeholder_not_a_cell():
+    ws_result = _detect(worksheet_name="CNA Claims")
+    assert "(worksheet name)" in ws_result.detail
+
+    file_result = _detect(source_file="Hardy_Risk_test.xlsx")
+    assert "(filename)" in file_result.detail
 
 
 # ---------------------------------------------------------------------------

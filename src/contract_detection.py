@@ -13,11 +13,19 @@ digit run so it can't fire inside an unrelated bigger number.
 Section matching additionally recognises a table column literally named 'Property Sec'
 or 'Property Section': its first data row value is read directly as the section code,
 alongside (not instead of) the phrase-based tiers.
+
+Every match (base contract and section) is tracked back to the specific cell it came
+from ('A1'-style, or '(worksheet name)'/'(filename)'/'(metadata)' where there's no
+single cell) - surfaced in ContractDetectionResult.detail, including the ambiguous-
+match warning, e.g. "multiple contracts matched in table_columns_and_values:
+{'BW01972': 'G6', 'BW05407': 'C12'}".
 """
 
 import json
 import re
 from dataclasses import dataclass
+
+from openpyxl.utils import get_column_letter
 
 from src.logging_utils import NULL_LOGGER
 
@@ -113,65 +121,103 @@ def _build_contract_index(contracts):
     return index
 
 
-def _find_alias_matches(alias_index, text_values):
-    matched_codes = set()
-    for text in text_values:
+def _cell_ref(col, row):
+    """'A1'-style reference, or a generic placeholder if position info isn't known."""
+    if col is None or row is None:
+        return "(unknown cell)"
+    return f"{get_column_letter(col)}{row}"
+
+
+def _find_alias_matches(alias_index, evidence):
+    """evidence: [(text, cell_ref), ...]. Returns {code: cell_ref} - the first cell
+    where each code was matched, for traceability (e.g. in the ambiguous-match warning).
+    """
+    matched = {}
+    for text, cell_ref in evidence:
         for pattern, code in alias_index:
-            if pattern.search(text):
-                matched_codes.add(code)
-    return matched_codes
+            if code not in matched and pattern.search(text):
+                matched[code] = cell_ref
+    return matched
 
 
 _SECTION_COLUMN_NAMES = {"property sec", "property section"}
 
 
-def _section_from_property_column(header_values, data_rows, sections):
+def _section_from_property_column(header_values, data_rows, sections, start_col, data_row_numbers):
     """If a header column is literally named 'Property Sec'/'Property Section'
     (case-insensitive), read the section letter directly from that column's first data
     row value - the value itself IS the section code, not a phrase to search for. None
     if there's no such column, no data, or the value doesn't match a configured section.
+    Returns (section, cell_ref) on a match.
     """
     for idx, header in enumerate(header_values):
         if header is not None and str(header).strip().lower() in _SECTION_COLUMN_NAMES:
             if not data_rows or idx >= len(data_rows[0]) or data_rows[0][idx] is None:
                 return None
             value = str(data_rows[0][idx]).strip()
-            return value if value in sections else None
+            if value not in sections:
+                return None
+            row = data_row_numbers[0] if data_row_numbers else None
+            col = (start_col + idx) if start_col is not None else None
+            return value, _cell_ref(col, row)
     return None
 
 
-def _evidence_tiers(source_file, worksheet_name, metadata, header_values, data_rows):
-    table_values = [str(v) for v in header_values if v is not None]
-    table_values.extend(str(v) for row in data_rows for v in row if v is not None)
+def _metadata_evidence(metadata):
+    cells = metadata.cells if len(metadata.cells) == len(metadata.values) else [None] * len(metadata.values)
+    return [(str(v), cell or "(metadata)") for v, cell in zip(metadata.values, cells)]
 
+
+def _table_evidence(header_values, data_rows, header_row, start_col, data_row_numbers):
+    evidence = []
+    for idx, v in enumerate(header_values):
+        if v is not None:
+            col = (start_col + idx) if start_col is not None else None
+            evidence.append((str(v), _cell_ref(col, header_row)))
+
+    row_numbers = data_row_numbers if len(data_row_numbers) == len(data_rows) else [None] * len(data_rows)
+    for row, row_num in zip(data_rows, row_numbers):
+        for idx, v in enumerate(row):
+            if v is not None:
+                col = (start_col + idx) if start_col is not None else None
+                evidence.append((str(v), _cell_ref(col, row_num)))
+    return evidence
+
+
+def _evidence_tiers(source_file, worksheet_name, metadata, header_values, data_rows, header_row, start_col, data_row_numbers):
     return [
-        ("metadata", [str(v) for v in metadata.values]),
-        ("table_columns_and_values", table_values),
-        ("worksheet_name", [worksheet_name]),
-        ("filename", [source_file.stem]),
+        ("metadata", _metadata_evidence(metadata)),
+        ("table_columns_and_values", _table_evidence(header_values, data_rows, header_row, start_col, data_row_numbers)),
+        ("worksheet_name", [(worksheet_name, "(worksheet name)")]),
+        ("filename", [(source_file.stem, "(filename)")]),
     ]
 
 
 def detect_contract_code_year(
     *, source_file, worksheet_name, metadata, header_values, data_rows,
+    header_row, start_col, data_row_numbers,
     contract_config, logger=NULL_LOGGER, ingestion_type=None,
 ):
-    tiers = _evidence_tiers(source_file, worksheet_name, metadata, header_values, data_rows)
+    tiers = _evidence_tiers(
+        source_file, worksheet_name, metadata, header_values, data_rows, header_row, start_col, data_row_numbers,
+    )
 
     contract_alias_index = _build_contract_index(contract_config.contracts)
 
     code = None
     base_tier = ""
-    for tier_name, texts in tiers:
-        matched_codes = _find_alias_matches(contract_alias_index, texts)
-        if len(matched_codes) == 1:
-            code = matched_codes.pop()
+    base_cell = ""
+    for tier_name, evidence in tiers:
+        matched = _find_alias_matches(contract_alias_index, evidence)
+        if len(matched) == 1:
+            code = next(iter(matched))
             base_tier = tier_name
+            base_cell = matched[code]
             break
-        if len(matched_codes) > 1:
+        if len(matched) > 1:
             return ContractDetectionResult(
                 contract_code_year="", status="ambiguous", tier=tier_name,
-                detail=f"multiple contracts matched in {tier_name}: {sorted(matched_codes)}",
+                detail=f"multiple contracts matched in {tier_name}: {matched}",
             )
 
     if code is None:
@@ -184,35 +230,39 @@ def detect_contract_code_year(
     if not sections:
         return ContractDetectionResult(
             contract_code_year=code, status="resolved", tier=base_tier,
-            detail=f"matched {code} via {base_tier}",
+            detail=f"matched {code} via {base_tier} ({base_cell})",
         )
 
     section_alias_index = _build_alias_index(
         {letter: entry["aliases"] for letter, entry in sections.items()}
     )
-    property_column_section = _section_from_property_column(header_values, data_rows, sections)
+    property_column_match = _section_from_property_column(header_values, data_rows, sections, start_col, data_row_numbers)
 
-    for tier_name, texts in tiers:
-        matched_sections = _find_alias_matches(section_alias_index, texts)
-        if tier_name == "table_columns_and_values" and property_column_section is not None:
-            matched_sections = matched_sections | {property_column_section}
+    for tier_name, evidence in tiers:
+        matched_sections = _find_alias_matches(section_alias_index, evidence)
+        if tier_name == "table_columns_and_values" and property_column_match is not None:
+            prop_section, prop_cell = property_column_match
+            matched_sections.setdefault(prop_section, prop_cell)
         if len(matched_sections) == 1:
-            section = matched_sections.pop()
+            section = next(iter(matched_sections))
             return ContractDetectionResult(
                 contract_code_year=f"{code}{section}", status="resolved", tier=f"{base_tier}+{tier_name}",
-                detail=f"matched {code} via {base_tier}; section {section} via {tier_name}",
+                detail=(
+                    f"matched {code} via {base_tier} ({base_cell}); "
+                    f"section {section} via {tier_name} ({matched_sections[section]})"
+                ),
                 section=section,
             )
         if len(matched_sections) > 1:
             return ContractDetectionResult(
                 contract_code_year=code, status="resolved", tier=base_tier,
                 detail=(
-                    f"matched {code} via {base_tier}; section ambiguous in {tier_name}: "
-                    f"{sorted(matched_sections)} - section dropped"
+                    f"matched {code} via {base_tier} ({base_cell}); section ambiguous in {tier_name}: "
+                    f"{matched_sections} - section dropped"
                 ),
             )
 
     return ContractDetectionResult(
         contract_code_year=code, status="resolved", tier=base_tier,
-        detail=f"matched {code} via {base_tier}; no section evidence found",
+        detail=f"matched {code} via {base_tier} ({base_cell}); no section evidence found",
     )

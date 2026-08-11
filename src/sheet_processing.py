@@ -33,6 +33,7 @@ _MAX_SHEET_NAME_LEN = 31
 class DataBlock:
     rows: list
     row_count: int
+    row_numbers: list = field(default_factory=list)  # source worksheet row per entry in rows
 
 
 @dataclass
@@ -97,6 +98,7 @@ def process_worksheet(
     detection = detect_contract_code_year(
         source_file=source_file, worksheet_name=worksheet_name, metadata=metadata,
         header_values=header_match.header_values, data_rows=data.rows,
+        header_row=header_match.row_index, start_col=header_match.start_col, data_row_numbers=data.row_numbers,
         contract_config=contract_config, logger=logger, ingestion_type=ingestion_type,
     )
     logger.log_step(
@@ -124,14 +126,18 @@ def extract_data_block(worksheet, header_match):
     start_col, end_col = header_match.start_col, header_match.end_col
 
     rows = []
+    row_numbers = []
     for occurrence_row in header_match.occurrence_rows:
-        rows.extend(_extract_block_rows(worksheet, occurrence_row, start_col, end_col, anchor_cols))
+        block_rows, block_row_numbers = _extract_block_rows(worksheet, occurrence_row, start_col, end_col, anchor_cols)
+        rows.extend(block_rows)
+        row_numbers.extend(block_row_numbers)
 
-    return DataBlock(rows=rows, row_count=len(rows))
+    return DataBlock(rows=rows, row_count=len(rows), row_numbers=row_numbers)
 
 
 def _extract_block_rows(worksheet, header_row, start_col, end_col, anchor_cols):
     rows = []
+    row_numbers = []
     row_index = header_row + 1
     max_row = worksheet.max_row
     while row_index <= max_row:
@@ -142,10 +148,11 @@ def _extract_block_rows(worksheet, header_row, start_col, end_col, anchor_cols):
         anchor_values = [worksheet.cell(row=row_index, column=c).value for c in anchor_cols]
         if all(v is not None for v in anchor_values):
             rows.append(row_values)
+            row_numbers.append(row_index)
         # else: row skipped (blank anchor columns), scan continues
 
         row_index += 1
-    return rows
+    return rows, row_numbers
 
 
 def has_meaningful_data(data_block):
