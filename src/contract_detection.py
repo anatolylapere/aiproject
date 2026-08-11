@@ -10,9 +10,18 @@ isolated) or the code's digit-core followed by exactly two more digits (e.g. BW0
 '1972' matches the '197225' in a numeric broker-ref field), isolated from any longer
 digit run so it can't fire inside an unrelated bigger number.
 
-Section matching additionally recognises a table column literally named 'Property Sec'
-or 'Property Section': its first data row value is read directly as the section code,
-alongside (not instead of) the phrase-based tiers.
+Section matching falls back, in order, to two row-by-row column sources - tried only
+after all four phrase tiers come up empty:
+  1. A table column literally named 'Property Sec'/'Property Section': each row's own
+     value IS the section code.
+  2. A column named 'Province': each row's value maps to a section (BC/B.C./British
+     Columbia -> A, AB/A.B./Alberta -> B).
+Both are read per row, not just the first row. If every row with a resolvable value
+agrees, the whole sheet resolves to that section as usual. If rows disagree, the sheet
+genuinely covers more than one section - ContractDetectionResult.row_sections is set to
+a {worksheet_row_number: section} mapping, and the caller (sheet_processing.py) splits
+the extracted rows into separate per-section results instead of using one section for
+the whole sheet.
 
 Every match (base contract and section) is tracked back to the specific cell it came
 from ('A1'-style, or '(worksheet name)'/'(filename)'/'(metadata)' where there's no
@@ -48,6 +57,11 @@ class ContractDetectionResult:
     tier: str  # evidence tier(s) that resolved it, "" if unresolved
     detail: str  # human-readable trace string, for logging + WorksheetResult.warnings
     section: str = None  # resolved section letter alone (e.g. "A"), or None if not applicable
+    base_code: str = None  # the resolved base contract, set whenever status == "resolved"
+    row_sections: dict = None  # {worksheet_row_number: section_or_None} when rows disagree on
+    # section (Property Sec/Province, read row by row) and the sheet must be split - the
+    # caller partitions the extracted rows by this mapping instead of using a single
+    # contract_code_year/section for the whole sheet
 
 
 def load_contract_codes(config_path):
@@ -147,26 +161,64 @@ def _find_alias_matches(alias_index, evidence):
 
 
 _SECTION_COLUMN_NAMES = {"property sec", "property section"}
+_PROVINCE_COLUMN_NAMES = {"province"}
+_PROVINCE_TO_SECTION = {
+    "bc": "A", "b.c": "A", "b.c.": "A", "british columbia": "A",
+    "ab": "B", "a.b": "B", "a.b.": "B", "alberta": "B",
+}
 
 
-def _section_from_property_column(header_values, data_rows, sections, start_col, data_row_numbers):
-    """If a header column is literally named 'Property Sec'/'Property Section'
-    (case-insensitive), read the section letter directly from that column's first data
-    row value - the value itself IS the section code, not a phrase to search for. None
-    if there's no such column, no data, or the value doesn't match a configured section.
-    Returns (section, cell_ref) on a match.
+def _province_value(raw):
+    return _PROVINCE_TO_SECTION.get(raw.strip().lower())
+
+
+def _column_index(header_values, names):
+    """Index of the first header matching one of the given names (case-insensitive,
+    trimmed), or None if no such column exists.
     """
     for idx, header in enumerate(header_values):
-        if header is not None and str(header).strip().lower() in _SECTION_COLUMN_NAMES:
-            if not data_rows or idx >= len(data_rows[0]) or data_rows[0][idx] is None:
-                return None
-            value = str(data_rows[0][idx]).strip()
-            if value not in sections:
-                return None
-            row = data_row_numbers[0] if data_row_numbers else None
-            col = (start_col + idx) if start_col is not None else None
-            return value, _cell_ref(col, row)
+        if header is not None and str(header).strip().lower() in names:
+            return idx
     return None
+
+
+def _resolve_row_based_section(
+    header_values, data_rows, data_row_numbers, sections, column_names, start_col, value_map=None,
+):
+    """Read a section from a column identified by name (e.g. 'Property Sec', 'Province')
+    - the cell value itself IS the section code, or maps to one via value_map (e.g.
+    Province's 'BC'/'Alberta' text) - evaluated row by row, not just the first row.
+
+    Returns None if no such column exists, or if the column exists but no row has a
+    value that resolves to a configured section (falls through to the next fallback
+    either way). Otherwise a tuple:
+      ("single", section, cell_ref) - every row with a resolvable value agrees
+      ("split", {row_number: section_or_None}) - rows disagree; caller must split
+    """
+    idx = _column_index(header_values, column_names)
+    if idx is None:
+        return None
+
+    row_numbers = data_row_numbers if len(data_row_numbers) == len(data_rows) else [None] * len(data_rows)
+    per_row = {}
+    for row, row_num in zip(data_rows, row_numbers):
+        value = row[idx] if idx < len(row) else None
+        if value is None:
+            per_row[row_num] = None
+            continue
+        raw = str(value).strip()
+        mapped = value_map(raw) if value_map else raw
+        per_row[row_num] = mapped if mapped in sections else None
+
+    distinct = {section for section in per_row.values() if section is not None}
+    if not distinct:
+        return None
+    if len(distinct) == 1:
+        section = next(iter(distinct))
+        first_row = next(row_num for row_num, s in per_row.items() if s == section)
+        col = (start_col + idx) if start_col is not None else None
+        return "single", section, _cell_ref(col, first_row)
+    return "split", per_row
 
 
 def _metadata_evidence(metadata):
@@ -250,19 +302,16 @@ def detect_contract_code_year(
     if not sections:
         return ContractDetectionResult(
             contract_code_year=code, status="resolved", tier=base_tier,
-            detail=f"matched {code} via {base_tier} ({base_cell})",
+            detail=f"matched {code} via {base_tier} ({base_cell})", base_code=code,
         )
 
+    # 1) phrase-based tiers: metadata, table text, worksheet name, filename (unchanged
+    # priority order, sequential stop-at-first-match, same as base-contract resolution)
     section_alias_index = _build_alias_index(
         {letter: entry["aliases"] for letter, entry in sections.items()}
     )
-    property_column_match = _section_from_property_column(header_values, data_rows, sections, start_col, data_row_numbers)
-
     for tier_name, evidence in tiers:
         matched_sections = _find_alias_matches(section_alias_index, evidence)
-        if tier_name == "table_columns_and_values" and property_column_match is not None:
-            prop_section, prop_cell = property_column_match
-            matched_sections.setdefault(prop_section, prop_cell)
         if len(matched_sections) == 1:
             section = next(iter(matched_sections))
             return ContractDetectionResult(
@@ -271,7 +320,7 @@ def detect_contract_code_year(
                     f"matched {code} via {base_tier} ({base_cell}); "
                     f"section {section} via {tier_name} ({matched_sections[section]})"
                 ),
-                section=section,
+                section=section, base_code=code,
             )
         if len(matched_sections) > 1:
             return ContractDetectionResult(
@@ -280,9 +329,42 @@ def detect_contract_code_year(
                     f"matched {code} via {base_tier} ({base_cell}); section ambiguous in {tier_name}: "
                     f"{matched_sections} - section dropped"
                 ),
+                base_code=code,
             )
+
+    # 2) last resort, only reached if every phrase tier came up empty: 'Property Sec'/
+    # 'Property Section' column, read row by row (not just the first row) - rows that
+    # disagree mean the sheet itself covers more than one section and must be split.
+    # 3) if that column doesn't exist at all, 'Province' column, same row-by-row logic,
+    # mapping BC/British Columbia -> A and AB/Alberta -> B.
+    for source_name, column_names, value_map in (
+        ("property_column", _SECTION_COLUMN_NAMES, None),
+        ("province_column", _PROVINCE_COLUMN_NAMES, _province_value),
+    ):
+        row_result = _resolve_row_based_section(
+            header_values, data_rows, data_row_numbers, sections, column_names, start_col, value_map,
+        )
+        if row_result is None:
+            continue
+        kind = row_result[0]
+        if kind == "single":
+            _, section, cell = row_result
+            return ContractDetectionResult(
+                contract_code_year=f"{code}{section}", status="resolved", tier=f"{base_tier}+{source_name}",
+                detail=f"matched {code} via {base_tier} ({base_cell}); section {section} via {source_name} ({cell})",
+                section=section, base_code=code,
+            )
+        _, row_sections = row_result
+        return ContractDetectionResult(
+            contract_code_year=code, status="resolved", tier=base_tier,
+            detail=(
+                f"matched {code} via {base_tier} ({base_cell}); section split by {source_name} per row: "
+                f"{row_sections}"
+            ),
+            base_code=code, row_sections=row_sections,
+        )
 
     return ContractDetectionResult(
         contract_code_year=code, status="resolved", tier=base_tier,
-        detail=f"matched {code} via {base_tier} ({base_cell}); no section evidence found",
+        detail=f"matched {code} via {base_tier} ({base_cell}); no section evidence found", base_code=code,
     )

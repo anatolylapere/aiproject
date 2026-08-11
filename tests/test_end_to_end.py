@@ -141,6 +141,42 @@ def test_risk_property_sec_column_splits_sheets_by_section(tmp_path, monkeypatch
     assert section_b_file.sheetnames == ["Risk_AltAnchor"]
 
 
+def test_bord_fixture_splits_rows_by_property_sec_and_province(tmp_path, monkeypatch):
+    # Bord BW0197325.xlsx: designed to exhaust every other section-detection method.
+    # Risk_Main's Property Sec is uniformly "A" (no split needed). Risk_AltAnchor's
+    # Property Sec disagrees row by row (B then A). Risk_AltAnchor x has no Property
+    # Sec column at all - only Province (BC then Alberta) - the last-resort fallback,
+    # and it also disagrees row by row. Both disagreeing sheets must split their rows
+    # across the BW01973A and BW01973B outputs, joining Risk_Main's whole-sheet BW01973A.
+    entry = FileListEntry(source_file=TEST_FILES_DIR / "Bord BW0197325.xlsx", ingestion_type="risk")
+
+    output_root, _, results_by_type = _run(monkeypatch, tmp_path, [entry])
+
+    by_sheet_and_code = {(r.worksheet_name, r.contract_code_year) for r in results_by_type["risk"]}
+    assert by_sheet_and_code == {
+        ("Risk_Main", "BW01973A"),
+        ("Risk_AltAnchor", "BW01973B"), ("Risk_AltAnchor", "BW01973A"),
+        ("Risk_AltAnchor x", "BW01973A"), ("Risk_AltAnchor x", "BW01973B"),
+        ("Risk_NoData", None), ("Notes", None),
+    }
+
+    # no "rolling"/"by month"/"database" in the filename -> premium/, not risk/
+    premium_dir = output_root / "premium"
+    assert sorted(p.name for p in premium_dir.iterdir()) == sorted(["BW01973A", "BW01973B"])
+
+    section_a_file = openpyxl.load_workbook(premium_dir / "BW01973A" / "Bord BW0197325__BW01973A.xlsx")
+    assert set(section_a_file.sheetnames) == {"Risk_Main", "Risk_AltAnchor", "Risk_AltAnchor x"}
+    risk_main_rows = [row[0].value for row in section_a_file["Risk_Main"].iter_rows(min_row=2, max_col=1)]
+    assert len(risk_main_rows) == 4  # whole sheet, no split
+    alt_anchor_a_rows = [row[0].value for row in section_a_file["Risk_AltAnchor"].iter_rows(min_row=2, max_col=1)]
+    assert alt_anchor_a_rows == ["POL-2002"]  # only the row whose Property Sec = A
+
+    section_b_file = openpyxl.load_workbook(premium_dir / "BW01973B" / "Bord BW0197325__BW01973B.xlsx")
+    assert set(section_b_file.sheetnames) == {"Risk_AltAnchor", "Risk_AltAnchor x"}
+    alt_anchor_b_rows = [row[0].value for row in section_b_file["Risk_AltAnchor"].iter_rows(min_row=2, max_col=1)]
+    assert alt_anchor_b_rows == ["POL-2001"]  # only the row whose Property Sec = B
+
+
 def test_claims_fixture_combines_since_no_sheet_name_has_a_date(tmp_path, monkeypatch):
     entry = FileListEntry(source_file=TEST_FILES_DIR / "HDI_Claims_test.xlsx", ingestion_type="claims")
 

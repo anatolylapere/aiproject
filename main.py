@@ -63,8 +63,9 @@ def process_entry(entry, anchors, contract_config, logger):
     file_summary["password_required"] = password_required
 
     worksheet_results = [
-        _process_and_validate(worksheet, entry, anchors, contract_config, logger)
+        result
         for worksheet in workbook.worksheets
+        for result in _process_and_validate(worksheet, entry, anchors, contract_config, logger)
     ]
 
     write_outputs(entry, worksheet_results, logger)
@@ -73,13 +74,16 @@ def process_entry(entry, anchors, contract_config, logger):
 
 
 def _process_and_validate(worksheet, entry, anchors, contract_config, logger):
-    result = process_worksheet(
+    # a worksheet normally yields one result, but the Property Sec/Province row-by-row
+    # fallback can split it into several (see sheet_processing.process_worksheet)
+    results = process_worksheet(
         worksheet, worksheet.title, entry.source_file, entry.ingestion_type,
         anchors[entry.ingestion_type], contract_config, logger=logger,
     )
-    if result.status == "extracted":
-        result.validation = validate_table(result, logger=logger)
-    return result
+    for result in results:
+        if result.status == "extracted":
+            result.validation = validate_table(result, logger=logger)
+    return results
 
 
 def _group_code(results):

@@ -62,16 +62,18 @@ def process_worksheet(
 ):
     """Detect the header, extract metadata + data, classify the worksheet's status, and
     (for extracted tables) detect the ContractCodeYear. Logs the anchor_detection,
-    metadata_extraction, data_extraction and contract_detection steps.
+    metadata_extraction, data_extraction and contract_detection steps. Returns a list
+    of WorksheetResult - normally one, but more than one when the Property Sec/Province
+    row-by-row fallback finds rows that disagree on section and the sheet must be split.
     """
     header_match = find_header_row(worksheet, anchor_pairs)
     if header_match is None:
         logger.log_step(source_file, ingestion_type, worksheet_name, "anchor_detection", "fail",
                          "no anchor pair matched any row")
-        return WorksheetResult(
+        return [WorksheetResult(
             source_file=source_file, ingestion_type=ingestion_type,
             worksheet_name=worksheet_name, status="skipped_no_header",
-        )
+        )]
 
     logger.log_step(
         source_file, ingestion_type, worksheet_name, "anchor_detection", "ok",
@@ -89,11 +91,11 @@ def process_worksheet(
                      "ok" if meaningful else "fail", f"{data.row_count} data rows extracted")
 
     if not meaningful:
-        return WorksheetResult(
+        return [WorksheetResult(
             source_file=source_file, ingestion_type=ingestion_type,
             worksheet_name=worksheet_name, status="skipped_no_data",
             header_match=header_match, metadata=metadata, data=data,
-        )
+        )]
 
     detection = detect_contract_code_year(
         source_file=source_file, worksheet_name=worksheet_name, metadata=metadata,
@@ -106,6 +108,11 @@ def process_worksheet(
         "ok" if detection.status == "resolved" else detection.status, detection.detail,
     )
 
+    if detection.row_sections is not None:
+        return _split_worksheet_result_by_section(
+            source_file, ingestion_type, worksheet_name, header_match, metadata, data, detection,
+        )
+
     result = WorksheetResult(
         source_file=source_file, ingestion_type=ingestion_type,
         worksheet_name=worksheet_name, status="extracted",
@@ -114,7 +121,35 @@ def process_worksheet(
     )
     if detection.status != "resolved":
         result.warnings.append(detection.detail)
-    return result
+    return [result]
+
+
+def _split_worksheet_result_by_section(source_file, ingestion_type, worksheet_name, header_match, metadata, data, detection):
+    """Partition a DataBlock's rows by detection.row_sections (worksheet_row_number ->
+    section_or_None) into one WorksheetResult per section - a row whose own value
+    didn't resolve to a configured section falls back to the base code with no section.
+    """
+    groups = {}
+    for row, row_num in zip(data.rows, data.row_numbers):
+        section = detection.row_sections.get(row_num)
+        group = groups.setdefault(section, {"rows": [], "row_numbers": []})
+        group["rows"].append(row)
+        group["row_numbers"].append(row_num)
+
+    results = []
+    for section, group in groups.items():
+        group_data = DataBlock(rows=group["rows"], row_count=len(group["rows"]), row_numbers=group["row_numbers"])
+        code_year = f"{detection.base_code}{section}" if section else detection.base_code
+        result = WorksheetResult(
+            source_file=source_file, ingestion_type=ingestion_type,
+            worksheet_name=worksheet_name, status="extracted",
+            header_match=header_match, metadata=metadata, data=group_data,
+            contract_code_year=code_year, contract_section=section,
+        )
+        if section is None:
+            result.warnings.append(f"no section evidence for these rows: {detection.detail}")
+        results.append(result)
+    return results
 
 
 def extract_data_block(worksheet, header_match):

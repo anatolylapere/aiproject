@@ -87,10 +87,12 @@ def test_claims_secondary_three_rows(claims_test_workbook, claims_anchor_pairs):
 
 def test_process_worksheet_extracted(risk_test_workbook, risk_anchor_pairs, contract_config):
     ws = risk_test_workbook["Risk_Main"]
-    result = process_worksheet(
+    results = process_worksheet(
         ws, "Risk_Main", Path("Hardy_Risk_test.xlsx"), "risk", risk_anchor_pairs, contract_config,
     )
 
+    assert len(results) == 1  # no Property Sec/Province row disagreement to split on
+    result = results[0]
     assert result.status == "extracted"
     assert result.data.row_count == 4
     assert result.contract_code_year == "BW01972"  # resolved via filename ("Hardy")
@@ -98,20 +100,56 @@ def test_process_worksheet_extracted(risk_test_workbook, risk_anchor_pairs, cont
 
 def test_process_worksheet_skipped_no_data(risk_test_workbook, risk_anchor_pairs, contract_config):
     ws = risk_test_workbook["Risk_NoData"]
-    result = process_worksheet(
+    results = process_worksheet(
         ws, "Risk_NoData", Path("Hardy_Risk_test.xlsx"), "risk", risk_anchor_pairs, contract_config,
     )
 
-    assert result.status == "skipped_no_data"
+    assert len(results) == 1
+    assert results[0].status == "skipped_no_data"
 
 
 def test_process_worksheet_skipped_no_header(risk_test_workbook, risk_anchor_pairs, contract_config):
     ws = risk_test_workbook["Notes"]
-    result = process_worksheet(
+    results = process_worksheet(
         ws, "Notes", Path("Hardy_Risk_test.xlsx"), "risk", risk_anchor_pairs, contract_config,
     )
 
-    assert result.status == "skipped_no_header"
+    assert len(results) == 1
+    assert results[0].status == "skipped_no_header"
+
+
+# ---------------------------------------------------------------------------
+# process_worksheet: Property Sec/Province row-by-row split into multiple results
+# ---------------------------------------------------------------------------
+
+def test_process_worksheet_splits_into_multiple_results_when_rows_disagree(risk_anchor_pairs, contract_config):
+    workbook = openpyxl.Workbook()
+    ws = workbook.active
+    ws.append(["Policy Number", "Inception Date", "Property Sec"])
+    ws.append(["POL-1", "2026-01-01", "B"])
+    ws.append(["POL-2", "2026-02-01", "A"])
+    ws.append(["POL-3", "2026-03-01", "A"])
+
+    results = process_worksheet(
+        ws, "Risk_Main", Path("Hardy_Risk_test.xlsx"), "risk", risk_anchor_pairs, contract_config,
+    )
+
+    assert len(results) == 2
+    by_code = {r.contract_code_year: r for r in results}
+    assert set(by_code) == {"BW01972B", "BW01972A"}
+
+    section_b = by_code["BW01972B"]
+    assert section_b.contract_section == "B"
+    assert section_b.status == "extracted"
+    assert [row[0] for row in section_b.data.rows] == ["POL-1"]
+
+    section_a = by_code["BW01972A"]
+    assert section_a.contract_section == "A"
+    assert [row[0] for row in section_a.data.rows] == ["POL-2", "POL-3"]
+
+    # both results share the same header/worksheet_name - only the data rows differ
+    assert section_a.worksheet_name == section_b.worksheet_name == "Risk_Main"
+    assert section_a.header_match is section_b.header_match
 
 
 # ---------------------------------------------------------------------------

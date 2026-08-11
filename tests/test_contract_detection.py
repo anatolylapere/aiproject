@@ -242,16 +242,100 @@ def test_property_sec_column_value_not_a_configured_section_is_ignored():
     assert result.section is None
 
 
-def test_property_sec_column_takes_priority_over_a_lower_tier():
-    # worksheet name alone would resolve section B, but the Property Sec column lives
-    # in the higher-priority table_columns_and_values tier and finds "A" there first -
-    # tier priority order still governs, same as every other evidence source.
+def test_phrase_tier_takes_priority_over_property_sec_column():
+    # Property Sec is a last-resort fallback, tried only after all four phrase tiers
+    # come up empty - worksheet name's "Sec B" phrase wins here, and the Property Sec
+    # column's "A" value is never even consulted.
     result = _detect(
         metadata_values=["Hardy"], header_values=["Policy Number", "Property Sec"],
         data_rows=[["POL-1", "A"]], worksheet_name="Sec B",
     )
 
+    assert result.contract_code_year == "BW01972B"
+    assert "worksheet_name" in result.tier
+
+
+# ---------------------------------------------------------------------------
+# Property Sec / Province read row by row: rows that disagree split the sheet instead
+# of resolving (or dropping) a single section for the whole thing
+# ---------------------------------------------------------------------------
+
+def test_property_sec_rows_that_agree_resolve_normally_no_split():
+    result = _detect(
+        header_values=["Policy Number", "Property Sec"],
+        data_rows=[["POL-1", "A"], ["POL-2", "A"], ["POL-3", "A"]], source_file="Hardy_Risk_test.xlsx",
+    )
+
     assert result.contract_code_year == "BW01972A"
+    assert result.row_sections is None
+
+
+def test_property_sec_rows_that_disagree_produce_a_row_split():
+    result = _detect(
+        header_values=["Policy Number", "Property Sec"],
+        data_rows=[["POL-1", "B"], ["POL-2", "A"]], source_file="Hardy_Risk_test.xlsx",
+    )
+
+    assert result.status == "resolved"
+    assert result.base_code == "BW01972"
+    assert result.row_sections == {6: "B", 7: "A"}  # _detect's data rows start at 6
+
+
+def test_province_bc_and_alberta_map_to_a_and_b():
+    result = _detect(
+        header_values=["Policy Number", "Province"],
+        data_rows=[["POL-1", "BC"]], source_file="Hardy_Risk_test.xlsx",
+    )
+    assert result.contract_code_year == "BW01972A"
+
+    result = _detect(
+        header_values=["Policy Number", "Province"],
+        data_rows=[["POL-1", "Alberta"]], source_file="Hardy_Risk_test.xlsx",
+    )
+    assert result.contract_code_year == "BW01972B"
+
+
+def test_province_only_used_when_property_sec_column_is_absent():
+    # Property Sec is checked first - if present (even with a single, agreeing value),
+    # Province is never consulted, even if it would have said something different
+    result = _detect(
+        header_values=["Policy Number", "Property Sec", "Province"],
+        data_rows=[["POL-1", "A", "Alberta"]], source_file="Hardy_Risk_test.xlsx",
+    )
+
+    assert result.contract_code_year == "BW01972A"
+
+
+def test_province_rows_that_disagree_produce_a_row_split():
+    result = _detect(
+        header_values=["Policy Number", "Province"],
+        data_rows=[["POL-1", "BC"], ["POL-2", "Alberta"]], source_file="Hardy_Risk_test.xlsx",
+    )
+
+    assert result.status == "resolved"
+    assert result.base_code == "BW01972"
+    assert result.row_sections == {6: "A", 7: "B"}
+
+
+def test_row_with_unresolvable_value_falls_back_to_none_in_the_split():
+    result = _detect(
+        header_values=["Policy Number", "Province"],
+        data_rows=[["POL-1", "BC"], ["POL-2", "Alberta"], ["POL-3", "Ontario"]],
+        source_file="Hardy_Risk_test.xlsx",
+    )
+
+    assert result.row_sections == {6: "A", 7: "B", 8: None}  # "Ontario" isn't configured
+
+
+def test_no_property_sec_or_province_column_falls_through_as_before():
+    result = _detect(
+        header_values=["Policy Number", "Region"],
+        data_rows=[["POL-1", "UK"]], source_file="Hardy_Risk_test.xlsx",
+    )
+
+    assert result.contract_code_year == "BW01972"
+    assert result.row_sections is None
+    assert "no section evidence found" in result.detail
 
 
 # ---------------------------------------------------------------------------
