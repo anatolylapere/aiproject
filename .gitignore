@@ -37,3 +37,5 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+
+config/
