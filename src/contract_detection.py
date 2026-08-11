@@ -29,11 +29,18 @@ single cell) - surfaced in ContractDetectionResult.detail, including the ambiguo
 match warning, e.g. "multiple contracts matched in table_columns_and_values:
 {'BW01972': 'G6', 'BW05407': 'C12'}".
 
-Free-text narrative columns ('Loss Details', 'Loss Description') are excluded entirely
-from table evidence (header and data cells alike) - unlike structured reference fields,
-they hold arbitrary human-written text prone to coincidentally matching an unrelated
-contract's alias and producing false ambiguity. This does not affect what gets
-extracted/written to output - only what counts as detection evidence.
+Some columns are excluded entirely from table evidence (header and data cells alike),
+for two different reasons - in both cases this only affects what counts as detection
+evidence, not what gets extracted/written to output:
+  - Free-text narrative columns ('Loss Details', 'Loss Description') hold arbitrary
+    human-written text prone to coincidentally matching an unrelated contract's alias,
+    producing false ambiguity.
+  - Reference/identifier columns ('Claim Number', 'Claim Ref', 'Claim Reference',
+    'Claim Reference Number', 'Policy Number') hold arbitrary case/policy identifiers
+    prone to coincidentally matching the digit-core+year numeric pattern of an
+    unrelated contract (e.g. a claim number like 'CS197354' isn't a reference to
+    BW01973, but its digits read as one), producing a false positive instead of
+    ambiguity - same underlying risk, opposite failure mode.
 
 BW01972-specific special case, checked before the row-by-row fallback above: if
 'Property Sec'/'Property Section'/'Section No'/'Sec No'/'Section'/'Property' reads 'C'
@@ -279,15 +286,27 @@ def _metadata_evidence(metadata):
     return [(str(v), cell or "(metadata)") for v, cell in zip(metadata.values, cells)]
 
 
-_EXCLUDED_EVIDENCE_COLUMNS = {"loss details", "loss description"}
+_EXCLUDED_EVIDENCE_COLUMNS = {
+    "loss details", "loss description",  # free-text narrative
+    "claim number", "claim ref", "claim reference", "claim reference number",  # claim/
+    "policy number",                                                          # policy IDs
+}
 
 
 def _table_evidence(header_values, data_rows, header_row, start_col, data_row_numbers):
-    """Free-text narrative columns (Loss Details/Loss Description) are excluded
-    entirely, header and data cells alike - unlike structured reference fields
-    (Agreement Number, Broker Ref), they hold arbitrary human-written text that's
-    prone to coincidentally matching an unrelated contract's alias, producing false
-    'multiple contracts matched' ambiguity instead of genuine evidence.
+    """Two kinds of columns are excluded entirely, header and data cells alike - unlike
+    structured reference fields that ARE genuine evidence (Agreement Number, Broker
+    Ref), these hold values prone to coincidentally resembling an unrelated contract's
+    evidence without actually being any:
+      - Free-text narrative (Loss Details/Loss Description): arbitrary human-written
+        text that can coincidentally contain a contract's alias word, producing false
+        'multiple contracts matched' ambiguity.
+      - Claim/policy identifiers (Claim Number, Claim Ref, Claim Reference, Claim
+        Reference Number, Policy Number): arbitrary case/policy codes that can
+        coincidentally contain a contract's digit-core+year numeric pattern (e.g. a
+        claim number's digits happening to read as another contract's code),
+        producing a false positive instead of ambiguity - same risk, opposite failure
+        mode, so excluded the same way.
     """
     excluded_cols = {
         idx for idx, v in enumerate(header_values)
