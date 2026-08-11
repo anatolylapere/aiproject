@@ -11,7 +11,7 @@ from pathlib import Path
 
 import openpyxl
 
-from src.anchor_detection import find_header_row
+from src.anchor_detection import find_all_header_rows
 from src.contract_detection import detect_contract_code_year
 from src.logging_utils import NULL_LOGGER
 from src.metadata_extraction import extract_metadata, join_metadata
@@ -65,15 +65,23 @@ def process_worksheet(
     metadata_extraction, data_extraction and contract_detection steps. Returns a list
     of WorksheetResult - normally one, but more than one when the Property Sec/Province
     row-by-row fallback finds rows that disagree on section and the sheet must be split.
+
+    A worksheet's header row can structurally satisfy more than one configured anchor
+    pair at once. If the pair-priority winner's own anchor columns turn out blank on
+    every row (net zero data), _select_header_match_with_data falls through to the next
+    matching pair instead of reporting the sheet as empty - it may carry real data under
+    a different pair's columns.
     """
-    header_match = find_header_row(worksheet, anchor_pairs)
-    if header_match is None:
+    header_matches = find_all_header_rows(worksheet, anchor_pairs)
+    if not header_matches:
         logger.log_step(source_file, ingestion_type, worksheet_name, "anchor_detection", "fail",
                          "no anchor pair matched any row")
         return [WorksheetResult(
             source_file=source_file, ingestion_type=ingestion_type,
             worksheet_name=worksheet_name, status="skipped_no_header",
         )]
+
+    header_match, data = _select_header_match_with_data(worksheet, header_matches)
 
     logger.log_step(
         source_file, ingestion_type, worksheet_name, "anchor_detection", "ok",
@@ -85,7 +93,6 @@ def process_worksheet(
     logger.log_step(source_file, ingestion_type, worksheet_name, "metadata_extraction", "ok",
                      f"{len(metadata.values)} metadata values extracted")
 
-    data = extract_data_block(worksheet, header_match)
     meaningful = has_meaningful_data(data)
     logger.log_step(source_file, ingestion_type, worksheet_name, "data_extraction",
                      "ok" if meaningful else "fail", f"{data.row_count} data rows extracted")
@@ -122,6 +129,25 @@ def process_worksheet(
     if detection.status != "resolved":
         result.warnings.append(detection.detail)
     return [result]
+
+
+def _select_header_match_with_data(worksheet, header_matches):
+    """Try each header candidate in pair-priority order, extracting its data block -
+    the first with meaningful data wins. A pair can structurally match the header row
+    yet have its own anchor columns blank on every row (net zero data); rather than
+    reporting the sheet as empty, fall through to the next matching pair, which may
+    carry the real data under different columns. Falls back to the first candidate,
+    unchanged, if none of them have data - preserves the existing 'header found, no
+    data' outcome for genuinely empty sheets.
+    """
+    fallback = None
+    for candidate in header_matches:
+        data = extract_data_block(worksheet, candidate)
+        if has_meaningful_data(data):
+            return candidate, data
+        if fallback is None:
+            fallback = (candidate, data)
+    return fallback
 
 
 def _split_worksheet_result_by_section(source_file, ingestion_type, worksheet_name, header_match, metadata, data, detection):

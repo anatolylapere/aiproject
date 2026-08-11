@@ -73,20 +73,25 @@ def _pair_cols(row_values, pair):
     return cols
 
 
-def find_header_row(worksheet, anchor_pairs):
-    """Pair-priority, early-stop, all-occurrences-collected header detection.
+def find_all_header_rows(worksheet, anchor_pairs):
+    """Header detection for every configured pair that matches somewhere in the sheet,
+    not just the first (see find_header_row for the early-stop, single-result form).
 
-    Tries each pair in config order; the first pair that matches any row wins (later
-    pairs are never tried). Every row matched by the winning pair is collected as an
-    occurrence, top to bottom - the first occurrence is the canonical header row that
-    defines the column framework (start_col/end_col/header_values) for extraction.
+    Tries each pair in config order; every pair with at least one match gets its own
+    HeaderMatch in the returned list, built the same way find_header_row builds its
+    single result - every row matched by that pair is collected as an occurrence, top
+    to bottom, and the first occurrence defines the column framework (start_col/
+    end_col/header_values). sheet_processing.py uses this to fall through to a later
+    pair when an earlier one's own anchor columns turn out blank on every row (the
+    header structurally matches, but there's no real data under it).
 
-    Returns a HeaderMatch, or None if no pair matches anywhere in the sheet.
+    Returns [] if no pair matches anywhere in the sheet.
     """
     max_row = worksheet.max_row
     max_col = worksheet.max_column
     all_row_values = [_row_values(worksheet, r, max_col) for r in range(1, max_row + 1)]
 
+    matches = []
     for pair in anchor_pairs:
         occurrence_rows = [
             row_index
@@ -102,7 +107,7 @@ def find_header_row(worksheet, anchor_pairs):
         header_values = first_row_values[start_col - 1:end_col]
         matched_pair_cols = _pair_cols(first_row_values, pair)
 
-        return HeaderMatch(
+        matches.append(HeaderMatch(
             row_index=occurrence_rows[0],
             start_col=start_col,
             end_col=end_col,
@@ -110,6 +115,16 @@ def find_header_row(worksheet, anchor_pairs):
             matched_pair=pair,
             matched_pair_cols=matched_pair_cols,
             occurrence_rows=occurrence_rows,
-        )
+        ))
 
-    return None
+    return matches
+
+
+def find_header_row(worksheet, anchor_pairs):
+    """Pair-priority, early-stop header detection: the first pair that matches any row
+    wins (later pairs are never tried), returned as a single HeaderMatch, or None if no
+    pair matches anywhere. A thin wrapper over find_all_header_rows for callers that
+    only care about structural header detection, not the data-driven pair fallback.
+    """
+    matches = find_all_header_rows(worksheet, anchor_pairs)
+    return matches[0] if matches else None
