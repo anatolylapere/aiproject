@@ -11,11 +11,15 @@ isolated) or the code's digit-core followed by exactly two more digits (e.g. BW0
 digit run so it can't fire inside an unrelated bigger number.
 
 Section matching falls back, in order, to two row-by-row column sources - tried only
-after all four phrase tiers come up empty:
-  1. A table column literally named 'Property Sec'/'Property Section': each row's own
-     value IS the section code.
-  2. A column named 'Province': each row's value maps to a section (BC/B.C./British
-     Columbia -> A, AB/A.B./Alberta -> B).
+after all four phrase tiers come up empty (and, for BW01972, after the Legal Expenses
+'C' check below has had first look at the same column):
+  1. A table column named 'Property Sec'/'Property Section'/'Section No'/'Sec No'/
+     'Section'/'Property' (the same name set the Legal Expenses check uses - it's the
+     same real-world column, just a different value): each row's own value IS the
+     section code.
+  2. A column named 'Province'/'Insured State, Province, Territory, Canton etc.': each
+     row's value maps to a section (BC/B.C./British Columbia -> A, AB/A.B./Alberta ->
+     B).
 Both are read per row, not just the first row. If every row with a resolvable value
 agrees, the whole sheet resolves to that section as usual. If rows disagree, the sheet
 genuinely covers more than one section - ContractDetectionResult.row_sections is set to
@@ -28,6 +32,13 @@ from ('A1'-style, or '(worksheet name)'/'(filename)'/'(metadata)' where there's 
 single cell) - surfaced in ContractDetectionResult.detail, including the ambiguous-
 match warning, e.g. "multiple contracts matched in table_columns_and_values:
 {'BW01972': 'G6', 'BW05407': 'C12'}".
+
+ContractDetectionResult.detail also always ends with a " | tiers: base[...] section[...]"
+evidence trail listing every tier that was checked (metadata/table_columns_and_values/
+worksheet_name/filename) and its outcome (no match / matched X / ambiguous), for both
+the base-contract loop and the section-phrase loop - so a result resolved by a later
+tier (e.g. filename) also shows that the earlier tiers were checked first and came up
+empty, without having to re-run detection by hand to find out why.
 
 Some columns are excluded entirely from table evidence (header and data cells alike),
 for two different reasons - in both cases this only affects what counts as detection
@@ -176,8 +187,28 @@ def _find_alias_matches(alias_index, evidence):
     return matched
 
 
-_SECTION_COLUMN_NAMES = {"property sec", "property section"}
-_PROVINCE_COLUMN_NAMES = {"province"}
+def _trace_entry(tier_name, matched):
+    """One tier's outcome (no match / matched X / ambiguous), for the evidence trail
+    appended to ContractDetectionResult.detail - so a match resolved by a later tier
+    (e.g. filename) also shows that the earlier tiers (metadata, table, worksheet name)
+    were checked first and came up empty. Purely descriptive - does not affect
+    resolution, which is unchanged.
+    """
+    if not matched:
+        return f"{tier_name}=no match"
+    if len(matched) == 1:
+        return f"{tier_name}=matched {next(iter(matched))}"
+    return f"{tier_name}=ambiguous {sorted(matched)}"
+
+
+def _trail_suffix(base_trace, section_trace=None):
+    trail = f"base[{', '.join(base_trace)}]"
+    if section_trace is not None:
+        trail += f" section[{', '.join(section_trace)}]"
+    return f" | tiers: {trail}"
+
+
+_PROVINCE_COLUMN_NAMES = {"province", "insured state, province, territory, canton etc."}
 _PROVINCE_TO_SECTION = {
     "bc": "A", "b.c": "A", "b.c.": "A", "british columbia": "A",
     "ab": "B", "a.b": "B", "a.b.": "B", "alberta": "B",
@@ -289,7 +320,7 @@ def _metadata_evidence(metadata):
 _EXCLUDED_EVIDENCE_COLUMNS = {
     "loss details", "loss description",  # free-text narrative
     "claim number", "claim ref", "claim reference", "claim reference number",  # claim/
-    "policy number",                                                          # policy IDs
+    "policy number",   "certificate reference"                                                      # policy IDs
 }
 
 
@@ -351,8 +382,10 @@ def detect_contract_code_year(
     code = None
     base_tier = ""
     base_cell = ""
+    base_trace = []
     for tier_name, evidence in tiers:
         matched = _find_alias_matches(contract_alias_index, evidence)
+        base_trace.append(_trace_entry(tier_name, matched))
         if len(matched) == 1:
             code = next(iter(matched))
             base_tier = tier_name
@@ -361,20 +394,21 @@ def detect_contract_code_year(
         if len(matched) > 1:
             return ContractDetectionResult(
                 contract_code_year="", status="ambiguous", tier=tier_name,
-                detail=f"multiple contracts matched in {tier_name}: {matched}",
+                detail=f"multiple contracts matched in {tier_name}: {matched}" + _trail_suffix(base_trace),
             )
 
     if code is None:
         return ContractDetectionResult(
             contract_code_year="", status="not_found", tier="",
-            detail="no contract evidence found in metadata, table, worksheet name, or filename",
+            detail="no contract evidence found in metadata, table, worksheet name, or filename"
+            + _trail_suffix(base_trace),
         )
 
     sections = contract_config.contracts[code].get("sections")
     if not sections:
         return ContractDetectionResult(
             contract_code_year=code, status="resolved", tier=base_tier,
-            detail=f"matched {code} via {base_tier} ({base_cell})", base_code=code,
+            detail=f"matched {code} via {base_tier} ({base_cell})" + _trail_suffix(base_trace), base_code=code,
         )
 
     # 1) phrase-based tiers: metadata, table text, worksheet name, filename (unchanged
@@ -382,8 +416,10 @@ def detect_contract_code_year(
     section_alias_index = _build_alias_index(
         {letter: entry["aliases"] for letter, entry in sections.items()}
     )
+    section_trace = []
     for tier_name, evidence in tiers:
         matched_sections = _find_alias_matches(section_alias_index, evidence)
+        section_trace.append(_trace_entry(tier_name, matched_sections))
         if len(matched_sections) == 1:
             section = next(iter(matched_sections))
             return ContractDetectionResult(
@@ -391,7 +427,7 @@ def detect_contract_code_year(
                 detail=(
                     f"matched {code} via {base_tier} ({base_cell}); "
                     f"section {section} via {tier_name} ({matched_sections[section]})"
-                ),
+                ) + _trail_suffix(base_trace, section_trace),
                 section=section, base_code=code,
             )
         if len(matched_sections) > 1:
@@ -400,7 +436,7 @@ def detect_contract_code_year(
                 detail=(
                     f"matched {code} via {base_tier} ({base_cell}); section ambiguous in {tier_name}: "
                     f"{matched_sections} - section dropped"
-                ),
+                ) + _trail_suffix(base_trace, section_trace),
                 base_code=code,
             )
 
@@ -418,17 +454,18 @@ def detect_contract_code_year(
                 detail=(
                     f"matched {code} via {base_tier} ({base_cell}); reclassified to "
                     f"{LEGAL_EXPENSES_CODE} (Legal Expenses) via legal_expenses_override ({override_cell})"
-                ),
+                ) + _trail_suffix(base_trace, section_trace),
                 base_code=LEGAL_EXPENSES_CODE,
             )
 
-    # 2) last resort, only reached if every phrase tier came up empty: 'Property Sec'/
-    # 'Property Section' column, read row by row (not just the first row) - rows that
-    # disagree mean the sheet itself covers more than one section and must be split.
-    # 3) if that column doesn't exist at all, 'Province' column, same row-by-row logic,
-    # mapping BC/British Columbia -> A and AB/Alberta -> B.
+    # 2) last resort, only reached if every phrase tier came up empty AND the value
+    # isn't 'C' (that's step 1.5 above): the same Property Sec/Property Section/Section
+    # No/Sec No/Section/Property column read row by row (not just the first row) -
+    # rows that disagree mean the sheet itself covers more than one section and must be
+    # split. 3) if that column doesn't exist at all, 'Province' column, same row-by-row
+    # logic, mapping BC/British Columbia -> A and AB/Alberta -> B.
     for source_name, column_names, value_map in (
-        ("property_column", _SECTION_COLUMN_NAMES, None),
+        ("property_column", _LEGAL_EXPENSES_COLUMN_NAMES, None),
         ("province_column", _PROVINCE_COLUMN_NAMES, _province_value),
     ):
         row_result = _resolve_row_based_section(
@@ -441,7 +478,8 @@ def detect_contract_code_year(
             _, section, cell = row_result
             return ContractDetectionResult(
                 contract_code_year=f"{code}{section}", status="resolved", tier=f"{base_tier}+{source_name}",
-                detail=f"matched {code} via {base_tier} ({base_cell}); section {section} via {source_name} ({cell})",
+                detail=(f"matched {code} via {base_tier} ({base_cell}); section {section} via {source_name} ({cell})"
+                        + _trail_suffix(base_trace, section_trace)),
                 section=section, base_code=code,
             )
         _, row_sections = row_result
@@ -450,11 +488,13 @@ def detect_contract_code_year(
             detail=(
                 f"matched {code} via {base_tier} ({base_cell}); section split by {source_name} per row: "
                 f"{row_sections}"
-            ),
+            ) + _trail_suffix(base_trace, section_trace),
             base_code=code, row_sections=row_sections,
         )
 
     return ContractDetectionResult(
         contract_code_year=code, status="resolved", tier=base_tier,
-        detail=f"matched {code} via {base_tier} ({base_cell}); no section evidence found", base_code=code,
+        detail=(f"matched {code} via {base_tier} ({base_cell}); no section evidence found"
+                + _trail_suffix(base_trace, section_trace)),
+        base_code=code,
     )

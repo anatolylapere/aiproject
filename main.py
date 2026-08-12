@@ -134,12 +134,14 @@ def write_outputs(entry, worksheet_results, logger):
     grouping per the approved plan). Both Risk (split into output/risk/ or
     output/premium/ by a filename keyword check) and Claims split out section-bearing
     worksheets, and worksheets resolved to BW05407 (Legal Expenses), into their own
-    files first (grouped by ContractCodeYear, so worksheets sharing a section/code
-    share a file - see _write_sectioned_groups); Claims additionally splits date-named
-    worksheets into their own files. Whatever's left combines into one file per source
-    file. A worksheet that is both independently-grouped and date-named is claimed by
-    the independent group first. Any output whose sheets agree on a single contract
-    code is nested under a {code}/ folder and has that code appended to its filename.
+    files (grouped by ContractCodeYear, so worksheets sharing a section/code share a
+    file - see _write_sectioned_groups). For Claims only, a worksheet whose name
+    contains a date is claimed *before* that section/BW05407 grouping and always gets
+    its own individual file, one worksheet per file, even if it shares a
+    ContractCodeYear with another dated worksheet - date-in-name takes priority over
+    everything else for Claims. Whatever's left (non-dated) combines/splits by code as
+    usual. Any output whose sheets agree on a single contract code is nested under a
+    {code}/ folder and has that code appended to its filename.
     """
     passed = [r for r in worksheet_results if r.status == "extracted" and r.validation.passed]
     failed = [r for r in worksheet_results if r.status == "extracted" and not r.validation.passed]
@@ -159,13 +161,13 @@ def write_outputs(entry, worksheet_results, logger):
             _write_grouped(base_dir, stem, remaining, logger)
         return
 
-    remaining = _write_sectioned_groups(OUTPUT_ROOT / "claims", stem, passed, logger)
-    dated = [r for r in remaining if worksheet_name_has_date(r.worksheet_name)]
-    no_date = [r for r in remaining if r not in dated]
+    dated = [r for r in passed if worksheet_name_has_date(r.worksheet_name)]
+    no_date = [r for r in passed if r not in dated]
     for result in dated:
         _write_grouped(OUTPUT_ROOT / "claims", f"{stem}__{result.worksheet_name}", [result], logger)
-    if no_date:
-        _write_grouped(OUTPUT_ROOT / "claims", stem, no_date, logger)
+    remaining = _write_sectioned_groups(OUTPUT_ROOT / "claims", stem, no_date, logger)
+    if remaining:
+        _write_grouped(OUTPUT_ROOT / "claims", stem, remaining, logger)
 
 
 def write_processing_log_workbook(ingestion_type, file_summaries, worksheet_results):

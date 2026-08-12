@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python \"C:\\\\Users\\\\tolia\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-tolia-Desktop-AI-Projects-Claude-projects-all-Claude-projects-v3-Project\\\\b940335f-e02f-4acf-a939-ea08406a1a0d\\\\scratchpad\\\\preview_contract_trace.py\")",
+      "Bash(python \"C:\\\\Users\\\\tolia\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-tolia-Desktop-AI-Projects-Claude-projects-all-Claude-projects-v3-Project\\\\b940335f-e02f-4acf-a939-ea08406a1a0d\\\\scratchpad\\\\preview_full_run.py\")",
+      "Bash(python -m pytest tests/ -q)"
+    ]
+  }
+}
